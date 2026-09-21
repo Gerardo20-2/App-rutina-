@@ -42,7 +42,7 @@ jobs:
         run: node --test tests/*.test.js
 
   build:
-    name: Preparar artefacto
+    name: Preparar y publicar
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -59,26 +59,27 @@ jobs:
       - name: Evitar el procesado de Jekyll
         run: touch .nojekyll
 
-      # `enablement: true` crea el sitio de Pages con origen «GitHub Actions»
-      # la primera vez, en lugar de exigir una visita a Settings → Pages. Si el
-      # plan de la cuenta no permite Pages (repositorio privado sin GitHub Pro),
-      # el paso falla aquí con un mensaje explícito en vez de más abajo.
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
+      # Desplegar a gh-pages branch directamente sin usar la API de Pages.
+      # GitHub Pages automáticamente publica el contenido de gh-pages.
+      - name: Desplegar en gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A .nojekyll public/ src/ index.html
 
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: '.'
+          # Crear un árbol limpio solo con los artefactos de despliegue
+          TREE=$(git write-tree)
 
-  deploy:
-    name: Publicar
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Desplegar en GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          # Obtener el commit padre del gh-pages actual (si existe)
+          GH_PAGES_COMMIT=$(git rev-parse origin/gh-pages 2>/dev/null || echo "")
+
+          # Crear el commit en gh-pages
+          if [ -n "$GH_PAGES_COMMIT" ]; then
+            COMMIT=$(git commit-tree $TREE -p $GH_PAGES_COMMIT -m "Deploy: $GITHUB_SHA")
+          else
+            COMMIT=$(git commit-tree $TREE -m "Deploy: $GITHUB_SHA")
+          fi
+
+          # Actualizar la rama gh-pages
+          git update-ref refs/heads/gh-pages $COMMIT
+          git push origin gh-pages
