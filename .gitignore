@@ -1,0 +1,22 @@
+# Dependencias (el proyecto no tiene ninguna, pero las herramientas locales sí)
+node_modules/
+
+# Artefactos de compilación y despliegue
+dist/
+_site/
+.cache/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Editores
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Registros y temporales
+*.log
+npm-debug.log*
+coverage/

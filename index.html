@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="es" data-theme-default="system">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>RoutineTracker — rutina diaria offline</title>
+  <meta name="description" content="Seguimiento de rutinas diarias offline-first: tus tareas, tus rachas y tu historial, guardados sólo en tu dispositivo.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f7fa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0f141b" media="(prefers-color-scheme: dark)">
+
+  <!-- PWA: rutas relativas para funcionar bajo el subdirectorio de GitHub Pages -->
+  <link rel="manifest" href="./public/manifest.webmanifest">
+  <link rel="icon" href="./public/favicon.ico" sizes="32x32">
+  <link rel="apple-touch-icon" href="./public/icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Rutina">
+
+  <link rel="stylesheet" href="./src/ui/styles/base.css">
+  <link rel="stylesheet" href="./src/ui/styles/layout.css">
+  <link rel="stylesheet" href="./src/ui/styles/components.css">
+
+  <!-- El módulo de entrada se precarga: descubrir el grafo de imports tras
+       parsear el HTML cuesta un viaje de ida y vuelta en redes móviles. -->
+  <link rel="modulepreload" href="./src/main.js">
+</head>
+<body>
+  <a class="sr-only" href="#contenido">Saltar al contenido</a>
+
+  <div id="app">
+    <!-- Esqueleto mínimo hasta que el módulo hidrata la interfaz. -->
+    <p class="boot-error" hidden>Cargando…</p>
+  </div>
+
+  <noscript>
+    <div class="boot-error">
+      <h1>RoutineTracker necesita JavaScript</h1>
+      <p>La aplicación funciona por completo en tu dispositivo: sin JavaScript no hay nada que ejecutar.</p>
+    </div>
+  </noscript>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

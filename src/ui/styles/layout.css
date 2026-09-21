@@ -1,0 +1,248 @@
+/**
+ * layout.css — estructura, rejilla y adaptación móvil.
+ *
+ * Mobile-first y organizado por **zona del pulgar**: la columna de contenido
+ * ocupa el centro, la lectura pasiva va arriba y la única zona con controles
+ * —la barra de acciones— queda fija en el borde inferior, dentro del arco que
+ * el pulgar alcanza sin recolocar el agarre.
+ *
+ * Los `env(safe-area-inset-*)` evitan que la barra de gestos de iOS o el
+ * recorte de la cámara tapen contenido en la PWA instalada.
+ */
+
+#app {
+  min-height: 100dvh;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  max-width: 720px;
+  margin: 0 auto;
+  padding-top: calc(var(--sp-4) + env(safe-area-inset-top));
+  padding-right: calc(var(--sp-4) + env(safe-area-inset-right));
+  padding-left: calc(var(--sp-4) + env(safe-area-inset-left));
+  /* Hueco para la barra inferior: sin él, la última tarea queda debajo. */
+  padding-bottom: calc(var(--sp-6) + var(--bar-height) + env(safe-area-inset-bottom));
+}
+
+/* --- Cabecera (zona pasiva) ------------------------------------------ */
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.header__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.header__title {
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.header__date,
+.header__summary {
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+}
+
+.header__stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--c-border);
+}
+
+.header__warning {
+  padding: var(--sp-3);
+  background: var(--c-danger-soft);
+  border-radius: var(--radius-md);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+}
+
+/* --- Contenido -------------------------------------------------------- */
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.section__head {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.section__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+}
+
+.app__footer {
+  padding-top: var(--sp-2);
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+
+/* --- Barra de acciones inferior (zona activa) ------------------------- */
+
+.bar {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  justify-items: center;
+  gap: var(--sp-2);
+  height: calc(var(--bar-height) + env(safe-area-inset-bottom));
+  padding-right: calc(var(--sp-3) + env(safe-area-inset-right));
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: calc(var(--sp-3) + env(safe-area-inset-left));
+  background: color-mix(in srgb, var(--c-surface) 92%, transparent);
+  border-top: 1px solid var(--c-border);
+  /* El desenfoque deja intuir la lista bajo la barra sin restarle contraste. */
+  backdrop-filter: blur(12px);
+}
+
+.bar__center {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+/* --- Hojas deslizantes ------------------------------------------------ */
+
+.sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.sheet__panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-height: min(88dvh, 720px);
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--c-surface);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  box-shadow: var(--shadow-md);
+}
+
+.sheet__body {
+  overflow-y: auto;
+  /* El scroll de la hoja no debe propagarse al documento de detrás. */
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 var(--sp-4) var(--sp-5);
+}
+
+.sheet__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.sheet__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+}
+
+/* --- Avisos ----------------------------------------------------------- */
+
+.toaster {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sp-3) + var(--bar-height) + env(safe-area-inset-bottom));
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: min(420px, calc(100vw - 2rem));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+}
+
+/* --- Puntos de ruptura ------------------------------------------------ */
+
+@media (min-width: 720px) {
+  .app {
+    gap: var(--sp-6);
+    padding-top: var(--sp-6);
+  }
+
+  .bar {
+    right: 50%;
+    left: 50%;
+    width: min(720px, 100vw);
+    transform: translateX(-50%);
+    border-inline: 1px solid var(--c-border);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+
+  .sheet__panel {
+    width: min(560px, 100vw);
+    margin: 0 auto;
+  }
+}
+
+@media (min-width: 1024px) {
+  .app {
+    max-width: 880px;
+  }
+}
+
+/* En apaisado la altura escasea: la cabecera se comprime para que la lista
+   siga siendo lo que ocupa la pantalla. */
+@media (max-height: 520px) and (orientation: landscape) {
+  .header__top {
+    align-items: flex-start;
+  }
+
+  .ring {
+    transform: scale(0.8);
+    transform-origin: top right;
+  }
+
+  .sheet__panel {
+    max-height: 94dvh;
+  }
+}

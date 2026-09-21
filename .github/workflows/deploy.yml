@@ -1,0 +1,90 @@
+# Despliegue de RoutineTracker en GitHub Pages.
+#
+# No hay paso de compilación: el repositorio ES la aplicación (ES Modules
+# nativos, CSS y HTML servidos tal cual). El artefacto se sube completo y el
+# único requisito es que las pruebas de dominio pasen antes de publicar.
+#
+# Requisitos de la cuenta: GitHub Pages sólo está disponible en repositorios
+# públicos o, si el repositorio es privado, con un plan de pago. El propio
+# workflow activa Pages la primera vez (`enablement: true`), así que no hace
+# falta configurarlo a mano en Settings → Pages.
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Permisos para publicar en Pages y hacer push a gh-pages.
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+# Un despliegue a la vez; no se cancelan los que ya están en curso.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Pruebas de dominio
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Ejecutar suite (sin dependencias)
+        run: node --test tests/*.test.js
+
+  build:
+    name: Preparar y publicar
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verificar que los iconos generados están al día
+        run: |
+          node scripts/generate-icons.mjs
+          if ! git diff --quiet -- public/icons public/favicon.ico; then
+            echo "::error::Los iconos versionados no coinciden con el generador. Ejecuta 'npm run icons' y haz commit."
+            exit 1
+          fi
+
+      - name: Evitar el procesado de Jekyll
+        run: touch .nojekyll
+
+      # Desplegar a gh-pages branch directamente sin usar la API de Pages.
+      # GitHub Pages automáticamente publica el contenido de gh-pages.
+      - name: Desplegar en gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global url."https://github-actions[bot]:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+          # Fetch la rama gh-pages si existe, pero no fallar si no existe
+          git fetch origin gh-pages --depth=1 2>/dev/null || true
+
+          # Preparar los archivos para despliegue
+          git add -A .nojekyll public/ src/ index.html
+          TREE=$(git write-tree)
+
+          # Crear el commit en gh-pages
+          # Intentar obtener el padre; si no existe, crear sin padre (rama huérfana)
+          PARENT=""
+          if git rev-parse origin/gh-pages >/dev/null 2>&1; then
+            PARENT="-p $(git rev-parse origin/gh-pages)"
+          fi
+
+          COMMIT=$(git commit-tree $TREE $PARENT -m "Deploy: $GITHUB_SHA")
+
+          # Actualizar la rama gh-pages
+          git update-ref refs/heads/gh-pages $COMMIT
+          git push origin gh-pages
