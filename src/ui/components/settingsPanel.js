@@ -39,7 +39,7 @@ export function createSettingsPanel(handlers) {
   });
 
   const themeSelect = h('select', {
-    class: 'field__input', id: 'pref-theme',
+    class: 'field__input field__input--tap', id: 'pref-theme',
     onChange: (event) => handlers.onPreferenceChange({ theme: event.target.value }),
   }, [
     h('option', { value: 'system', text: 'Según el sistema' }),
@@ -58,9 +58,11 @@ export function createSettingsPanel(handlers) {
 
   const engineEl = h('span', { class: 'settings__engine' });
 
-  const el = h('section', { class: 'settings card', 'aria-labelledby': 'settings-title' }, [
-    h('div', { class: 'card__head' }, [
-      h('h2', { class: 'card__title', id: 'settings-title', text: 'Ajustes' }),
+  // Sin cromo de tarjeta: el componente vive dentro de una hoja inferior, que
+  // ya aporta título, fondo y bordes.
+  const el = h('div', { class: 'settings' }, [
+    h('p', { class: 'settings__storage' }, [
+      h('span', { text: 'Almacenamiento: ' }),
       engineEl,
     ]),
     hapticsToggle.el,

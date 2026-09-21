@@ -14,11 +14,13 @@ propia aplicación.
 ## Tabla de contenidos
 
 - [Características](#características)
+- [Ergonomía móvil: la zona del pulgar](#ergonomía-móvil-la-zona-del-pulgar)
 - [Arquitectura](#arquitectura)
 - [Estructura del repositorio](#estructura-del-repositorio)
 - [Modelo de datos](#modelo-de-datos)
 - [Algoritmo de racha resiliente](#algoritmo-de-racha-resiliente)
 - [Interacción táctil](#interacción-táctil)
+- [Rutas y GitHub Pages](#rutas-y-github-pages)
 - [Desarrollo local](#desarrollo-local)
 - [Pruebas](#pruebas)
 - [Despliegue](#despliegue)
@@ -31,16 +33,59 @@ propia aplicación.
 
 | Área | Detalle |
 |---|---|
+| Ergonomía | Diseño para una sola mano: lectura arriba, **todas** las acciones en una barra inferior fija, hojas deslizantes en lugar de modales y objetivos táctiles de 48 px |
 | Persistencia | IndexedDB `routine_tracker_db` v2 con tres *object stores* e índices; migración automática desde el `APP_STATE_V1` de la v1 |
 | Rachas | Algoritmo resiliente con umbrales parciales, **escudos** (hasta 3) y puntuación de consistencia por media móvil exponencial |
 | Corte de día | Detección de medianoche por comparación de clave de día, resistente a suspensión del dispositivo, pestañas en segundo plano y cambios de reloj |
-| Gestos | Swipe → completar, swipe ← dispensar, con bloqueo de eje, resistencia elástica y confirmación por velocidad |
+| Gestos | Swipe → completar, swipe ← dispensar, con bloqueo de eje, fricción logarítmica, confirmación por distancia o velocidad y respuesta visual progresiva |
+| Respuesta | UI optimista: el estado se pinta en el frame del gesto y se revierte si la escritura falla |
 | Háptica | Patrones de vibración diferenciados por acción (Vibration API) |
 | Pantalla | Screen Wake Lock opcional con re-adquisición automática |
 | Visualización | Heatmap de 20 semanas dibujado en `<canvas>` con soporte de alta densidad y tema claro/oscuro |
 | PWA | Manifest instalable, iconos *maskable*, Service Worker con estrategias diferenciadas y aviso de actualización |
 | Datos | Exportación e importación del volcado completo en JSON |
+| Primer arranque | Cuatro hábitos de ejemplo, uno por bloque: la app se usa antes de configurarla |
+| Robustez | Bloques plegables, aviso y congelación del cálculo diario si el reloj del dispositivo retrocede |
 | Accesibilidad | Objetivos táctiles de 44 px, foco visible, `aria-live` en avisos, equivalentes textuales del heatmap, respeto por `prefers-reduced-motion` |
+
+## Ergonomía móvil: la zona del pulgar
+
+En un teléfono de 6,1"–6,7" sujetado con una mano, el pulgar barre cómodamente
+el tercio inferior de la pantalla. La esquina superior opuesta exige recolocar
+el agarre, que es justo el momento en que se cae el móvil. La interfaz reparte
+la pantalla en consecuencia:
+
+```
+┌──────────────────────────────┐
+│  CABECERA — sólo lectura     │  fecha · racha · anillo de progreso
+│  (cero controles)            │  y el aviso de reloj desincronizado
+├──────────────────────────────┤
+│                              │
+│  LISTA — bloques plegables   │  toda la rutina; sólo el bloque de la
+│  swipe → completar           │  hora actual arranca desplegado
+│  swipe ← dispensar           │
+│                              │
+├──────────────────────────────┤
+│  📊 Histórico  (+)  ⚙️ Ajustes │  BARRA FIJA — todas las acciones
+└──────────────────────────────┘  FAB de 56 px centrado; safe-area respetada
+```
+
+Decisiones que se derivan de ese reparto:
+
+- **La cabecera no tiene ni un botón.** Una prueba end-to-end lo verifica
+  (`headerControls === 0`): si alguien añade un control ahí, CI lo detecta.
+- **Nada de modales centrados.** Alta y edición de tareas, ajustes e histórico
+  se abren como **hoja inferior** (`bottomSheet.js`), arrastrable hacia abajo
+  para cerrar. Con el teclado virtual desplegado, un modal centrado queda
+  partido por la mitad; una hoja anclada abajo mantiene los controles pegados
+  al borde del teclado.
+- **48 px de objetivo táctil** en todo lo tocable (WCAG 2.2, criterio 2.5.8).
+  Donde el elemento visible es menor —el círculo de completar mide 28 px— el
+  área se amplía con un pseudoelemento sin agrandar el dibujo. La prueba e2e
+  mide cada control y falla si alguno baja de 48.
+- **Bloques plegables.** Una rutina completa son cuatro bloques y más de dos
+  pantallas de scroll. A las ocho de la mañana, las tareas de la noche son
+  ruido: arranca abierto sólo el bloque de la hora actual.
 
 ## Arquitectura
 
@@ -113,15 +158,17 @@ routine-tracker/
 │   │   ├── haptics.js             # Vibration API
 │   │   └── wakeLock.js            # Screen Wake Lock API
 │   ├── ui/
-│   │   ├── components/            # header · taskItem · taskList · heatmap
-│   │   │                          # taskEditor · settingsPanel · toast
+│   │   ├── components/            # header · taskList · taskItem · touchTaskItem
+│   │   │                          # bottomBar · bottomSheet · taskEditor
+│   │   │                          # settingsPanel · heatmap · toast
 │   │   ├── styles/                # base.css · layout.css · components.css
 │   │   ├── dom.js                 # Constructores de nodos sin innerHTML
 │   │   └── renderer.js            # Montaje y suscripción al store
 │   └── main.js                    # Punto de entrada
 ├── scripts/
 │   ├── generate-icons.mjs         # Generador de PNG/ICO sin dependencias
-│   └── check-precache.mjs         # Coherencia de la lista del Service Worker
+│   ├── check-precache.mjs         # Coherencia de la lista del Service Worker
+│   └── merge-to-main.sh           # Consolidación de la rama en main
 ├── tests/                         # Suite con el runner nativo de Node
 │   └── e2e/smoke.mjs              # Prueba de humo opcional en Chromium
 ├── docs/SPEC.md                   # Especificación técnica exhaustiva
@@ -224,14 +271,48 @@ tareas activas y como `VOID` los que no.
 
 ## Interacción táctil
 
+| Gesto | Acción | Respuesta |
+|---|---|---|
+| Swipe → más del 35 % | Completar / descompletar | Fondo verde progresivo, icono de verificación que crece, vibración al cruzar el umbral |
+| Swipe ← más del 35 % | Dispensar por hoy (sale del denominador) | Fondo ámbar progresivo, icono de omisión, vibración sutil |
+| Toque en la fila | Alterna completado | Vibración corta |
+| Toque en la cabecera del bloque | Pliega o despliega | Vibración corta |
+
 - **Bloqueo de eje.** Al superar el umbral, el gesto elige eje horizontal o
   vertical y no lo reevalúa: un swipe diagonal dentro de una lista hace scroll,
   no descarta la tarea.
 - **Confirmación por distancia o por velocidad.** Se confirma al 35 % del ancho
   o con un *fling* de 0,45 px/ms, lo que ocurra antes.
-- **Resistencia elástica.** Pasado el punto de confirmación el elemento se
-  frena, comunicando de forma táctil que ya no hace falta arrastrar más.
+- **Fricción logarítmica** más allá del 50 % del ancho:
+  `dx' = L + k·ln(1 + (|dx| − L)/k)`. El elemento sigue al dedo 1:1 mientras el
+  gesto es informativo y luego se frena de forma asintótica: nunca hay un tope
+  duro, pero arrastrar más deja de producir recorrido.
+- **UI optimista.** El estado visual se aplica en el frame del gesto, antes de
+  que resuelva la transacción de IndexedDB. Si la escritura falla, el servicio
+  revierte el log y el siguiente render devuelve la fila a su sitio.
 - **Sólo `transform`.** El arrastre no toca propiedades que disparen layout.
+
+## Rutas y GitHub Pages
+
+GitHub Pages publica el proyecto en `https://<usuario>.github.io/<repo>/`, no en
+la raíz del dominio. Cualquier ruta absoluta (`/src/main.js`, `/sw.js`) apunta
+fuera del despliegue y da 404. Reglas que sigue el repositorio:
+
+| Elemento | Regla |
+|---|---|
+| `index.html` | Todo recurso con `./`; ninguna referencia empieza por `/` |
+| Imports ES Modules | Siempre relativos entre módulos |
+| Service Worker | `navigator.serviceWorker.register('./sw.js', { scope: './' })` |
+| Precaché del SW | `ASSETS_TO_CACHE` son rutas relativas resueltas contra `self.registration.scope` |
+| `manifest.webmanifest` | Vive en `public/`, así que sus rutas se resuelven **contra el manifest**: `start_url: "../index.html"` y `scope: "../"` apuntan a la raíz de la app |
+
+> **Sobre el manifest.** Los campos `"./index.html"` y `"./"` sólo son correctos
+> si el manifest está en la raíz. Desde `public/`, resolverían a
+> `/<repo>/public/index.html` —que no existe— y a un *scope* que deja la
+> aplicación fuera. `../` produce exactamente las URLs pretendidas:
+> `/<repo>/index.html` y `/<repo>/`. La prueba `tests/deployPaths.test.js` fija
+> esa resolución, y la end-to-end sirve la app bajo `/App-rutina-/` para
+> comprobarlo en un navegador real.
 
 ## Desarrollo local
 
@@ -259,11 +340,18 @@ __routineTracker.dayReset.check('manual')  // forzar el corte de día
 npm test                          # o: node --test tests/*.test.js
 ```
 
-68 pruebas sobre el runner nativo de Node, sin navegador ni dependencias:
-utilidades de fecha, validación de contratos, el algoritmo de racha completo
-(umbrales, escudos, reconciliación, truncado, EWMA), el bus de eventos, el
-repositorio con su migración desde la v1 y el corte de medianoche con reloj
-inyectado, incluidos los saltos de reloj hacia atrás.
+99 pruebas sobre el runner nativo de Node, sin navegador ni dependencias:
+
+| Archivo | Cubre |
+|---|---|
+| `dateUtils.test.js` | Claves de día en hora local, bisiestos, husos |
+| `taskValidator.test.js` | Contratos e invariantes del modelo |
+| `streakCalculator.test.js` | Umbrales, escudos, reconciliación, EWMA |
+| `gestures.test.js` | Máquina de estados del swipe, bloqueo de eje, fricción logarítmica |
+| `deployPaths.test.js` | Ninguna ruta absoluta; resolución del manifest y del precaché bajo subdirectorio |
+| `repository.test.js` | Persistencia, migración v1, siembra, bloques plegables, UI optimista y su reversión |
+| `dayResetService.test.js` | Corte de medianoche, ausencias, congelación por reloj desincronizado |
+| `events.test.js` | Bus de eventos y aislamiento de errores |
 
 Comprobaciones adicionales en CI:
 
@@ -280,14 +368,59 @@ npm install --no-save playwright && npx playwright install chromium
 npm run test:e2e
 ```
 
-Levanta su propio servidor estático y verifica en Chromium lo que el runner de
-Node no alcanza: render real, gesto de swipe, IndexedDB del navegador, píxeles
-del heatmap, alcance del Service Worker, persistencia tras recargar y arranque
-**sin conexión**.
+Levanta su propio servidor estático **bajo un subdirectorio**
+(`/App-rutina-/`, igual que GitHub Pages) y verifica en Chromium lo que el
+runner de Node no alcanza:
+
+- Rutina de bienvenida: cuatro tareas, una por bloque.
+- Ergonomía medida sobre el render real: barra anclada al borde inferior, FAB
+  de 56 × 56, cabecera sin controles y **ningún objetivo táctil por debajo de
+  48 px**.
+- Bloques plegables: estado inicial, `aria-expanded` y plegado por toque.
+- Hoja inferior: apertura, cierre por arrastre, cierre con Escape y `aria-modal`.
+- Swipe de dispensar, UI optimista al completar, píxeles del heatmap.
+- Service Worker: alcance `/App-rutina-/`, 37 recursos precacheados bajo esa
+  ruta y arranque completo **sin conexión**.
+- Manifest: `start_url`, `scope` e iconos resueltos dentro del subdirectorio.
 
 ## Despliegue
 
-1. **Settings → Pages → Source: “GitHub Actions”.**
+### Consolidar la rama de trabajo en `main`
+
+Con el script incluido (comprueba el árbol limpio, ejecuta pruebas y
+verificación de iconos, fusiona sin *fast-forward* y reintenta el push):
+
+```bash
+./scripts/merge-to-main.sh --dry-run    # enseña lo que haría, sin tocar nada
+./scripts/merge-to-main.sh              # pide confirmación y publica
+```
+
+O a mano, que es exactamente lo mismo:
+
+```bash
+# 0. Árbol limpio y verificación previa
+git status --porcelain                  # debe estar vacío
+node --test tests/*.test.js
+node scripts/check-precache.mjs
+
+# 1a. Si `main` YA existe en el remoto
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+git merge --no-ff claude/routinetracker-pwa-architecture-odvg33 \
+  -m "merge: RoutineTracker PWA en main"
+git push -u origin main
+
+# 1b. Si `main` NO existe todavía (repositorio recién creado)
+git push -u origin claude/routinetracker-pwa-architecture-odvg33:main
+```
+
+Ante un fallo de red, reintenta el push con espera creciente (2 s, 4 s, 8 s,
+16 s). Nunca uses `--force` sobre `main`.
+
+### Publicación
+
+1. **Settings → Pages → Source: “GitHub Actions”** (una sola vez).
 2. Cada `push` a `main` ejecuta `deploy.yml`: pruebas → verificación de iconos
    → publicación del repositorio completo como artefacto de Pages.
 
@@ -303,7 +436,8 @@ un dominio que bajo `usuario.github.io/repositorio/`.
 | Service Worker | La app funciona online con normalidad; no hay caché offline |
 | Vibration API | Interruptor deshabilitado, explicando el motivo |
 | Screen Wake Lock | Interruptor deshabilitado, explicando el motivo |
-| `dialog.showModal` | El editor degrada a panel con atributo `open` |
+| `DOMMatrixReadOnly` | La hoja arrastrada a mitad de animación parte de cero en vez de su posición real |
+| `color-mix()` | Los textos del swipe mantienen la tinta de la acción sin virar a blanco |
 | `ResizeObserver` | El heatmap se redibuja con el evento `resize` |
 | `CanvasRenderingContext2D.roundRect` | Trazado equivalente con `arcTo` |
 

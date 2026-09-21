@@ -64,9 +64,12 @@ function registerServiceWorker() {
   else window.addEventListener('load', register, { once: true });
 
   function register() {
-    // `./sw.js` vive en la raíz para obtener alcance sobre toda la aplicación;
-    // la implementación real está en `public/sw.js` (ver README).
-    navigator.serviceWorker.register('./sw.js').then((registration) => {
+    // Rutas relativas al documento, nunca absolutas: en GitHub Pages la app
+    // cuelga de `/<repo>/`, así que `/sw.js` daría 404. El scope explícito
+    // `./` deja constancia de la intención y coincide con el máximo alcance
+    // permitido para un worker servido desde la raíz de la aplicación.
+    const swPath = './sw.js';
+    navigator.serviceWorker.register(swPath, { scope: './' }).then((registration) => {
       registration.addEventListener('updatefound', () => {
         const installing = registration.installing;
         if (!installing) return;

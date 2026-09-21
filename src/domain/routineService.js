@@ -9,20 +9,26 @@
  * emitir evento**. Si la escritura falla, el store no miente al usuario.
  */
 
-import { EVENTS, LIMITS, SECTIONS } from '../core/constants.js';
+import { EVENTS, LIMITS, SECTIONS, SECTION_ORDER } from '../core/constants.js';
 import { toDateKey, currentSection } from '../core/dateUtils.js';
 import { createExecutionRecord, validateDailyLog, ValidationError } from './taskValidator.js';
 import { buildHistory } from './selectors.js';
 import { projectToday } from './streakCalculator.js';
 
-/** Rutina inicial sugerida en el primer arranque. */
+/**
+ * Rutina inicial del primer arranque: cuatro hábitos comunes, uno por bloque
+ * del día.
+ *
+ * El número importa. Una lista vacía obliga a dar de alta tareas antes de ver
+ * para qué sirve la aplicación, y una lista larga se percibe como deberes
+ * ajenos. Cuatro caben en una pantalla, se completan el primer día y dejan la
+ * racha en marcha desde el minuto uno; el usuario las edita o las archiva
+ * cuando ya sabe qué quiere.
+ */
 export const SEED_TASKS = Object.freeze([
   { title: 'Beber un vaso de agua', section: SECTIONS.MORNING, estimatedMinutes: 1 },
-  { title: 'Meditación 10 min', section: SECTIONS.MORNING, estimatedMinutes: 10 },
-  { title: 'Revisar las 3 prioridades del día', section: SECTIONS.MORNING, estimatedMinutes: 5 },
-  { title: 'Caminar 20 min', section: SECTIONS.AFTERNOON, estimatedMinutes: 20 },
-  { title: 'Leer 15 páginas', section: SECTIONS.EVENING, estimatedMinutes: 20 },
-  { title: 'Preparar la mochila de mañana', section: SECTIONS.EVENING, estimatedMinutes: 5 },
+  { title: 'Caminata de 15 min', section: SECTIONS.AFTERNOON, estimatedMinutes: 15 },
+  { title: 'Dejar pantallas 30 min antes de dormir', section: SECTIONS.EVENING, estimatedMinutes: 30 },
   { title: 'Estirar la espalda', section: SECTIONS.ANYTIME, estimatedMinutes: 5 },
 ]);
 
@@ -69,7 +75,11 @@ export class RoutineService {
       streak,
       preferences,
       history: buildHistory(logs),
-      ui: { ...this._store.getState().ui, persistence: this._repository.engine },
+      ui: {
+        ...this._store.getState().ui,
+        persistence: this._repository.engine,
+        collapsedSections: defaultCollapsedSections(tasks),
+      },
     });
     this._bus.emit(EVENTS.READY, { engine: this._repository.engine, tasks: tasks.length });
   }
@@ -138,6 +148,7 @@ export class RoutineService {
     if (!draft.id && !draft.section) draft.section = currentSection();
     const task = await this._repository.saveTask(draft);
     await this._refreshTasks();
+    this._expandSection(task.section);
     this._bus.emit(EVENTS.TASK_SAVED, { task, isNew: !input.id });
     return task;
   }
@@ -154,6 +165,22 @@ export class RoutineService {
     await this._repository.reorderTasks(orderedIds);
     await this._refreshTasks();
     this._bus.emit(EVENTS.TASKS_REORDERED, { orderedIds });
+  }
+
+  /**
+   * Pliega o despliega un bloque del día. Es estado de interfaz, no de
+   * dominio: no se persiste, cada sesión vuelve a abrir el bloque de la hora
+   * actual.
+   * @param {string} section
+   */
+  toggleSection(section) {
+    const ui = this._store.getState().ui;
+    const collapsed = new Set(ui.collapsedSections);
+    if (collapsed.has(section)) collapsed.delete(section);
+    else collapsed.add(section);
+    this._store.patch('ui', { collapsedSections: [...collapsed] });
+    this._bus.emit(EVENTS.SECTION_TOGGLED, { section, collapsed: collapsed.has(section) });
+    return [...collapsed];
   }
 
   /** @param {Object} patch */
@@ -185,24 +212,55 @@ export class RoutineService {
   }
 
   /**
-   * Escribe un registro de ejecución y propaga el log recalculado.
+   * Escribe un registro de ejecución con **actualización optimista**: el store
+   * recibe el log recalculado de inmediato y la transacción de IndexedDB se
+   * resuelve después. Si falla, se revierte al log anterior y el error se
+   * propaga para que la interfaz lo cuente.
+   *
+   * El orden habitual de esta capa es persistir → actualizar → emitir; aquí se
+   * invierte a propósito, porque una marca de tarea es la interacción más
+   * frecuente de la aplicación y llega por gesto táctil: un retardo de 30 ms
+   * entre el dedo y el tachado se percibe como que la app "no ha registrado"
+   * el toque. La reversión mantiene la garantía de que el store no miente
+   * durante más de una escritura fallida.
+   *
    * @param {import('./taskValidator.js').DailyLog} currentLog
    * @param {string} taskId
    * @param {Partial<import('./taskValidator.js').TaskExecutionRecord>} patch
    */
   async _writeEntry(currentLog, taskId, patch) {
     const entries = { ...currentLog.entries, [taskId]: createExecutionRecord(patch) };
-    const next = validateDailyLog({ ...currentLog, entries });
-    const saved = await this._repository.saveLog(next);
+    const optimistic = validateDailyLog({ ...currentLog, entries });
+    const previousHistory = this._store.getState().history;
+
+    this._applyLog(optimistic);
+    try {
+      const saved = await this._repository.saveLog(optimistic);
+      this._applyLog(saved);
+      return saved;
+    } catch (error) {
+      this._store.setState({ log: currentLog, history: previousHistory });
+      this._bus.emit(EVENTS.ERROR, { scope: 'write-entry', taskId, error });
+      throw error;
+    }
+  }
+
+  /**
+   * Publica un log en el store junto con su entrada de historial.
+   * @param {import('./taskValidator.js').DailyLog} log
+   */
+  _applyLog(log) {
     this._store.setState({
-      log: saved,
-      history: { ...this._store.getState().history, [saved.date]: {
-        completionRate: saved.completionRate,
-        completedCount: saved.completedCount,
-        totalActiveTasks: saved.totalActiveTasks,
-      } },
+      log,
+      history: {
+        ...this._store.getState().history,
+        [log.date]: {
+          completionRate: log.completionRate,
+          completedCount: log.completedCount,
+          totalActiveTasks: log.totalActiveTasks,
+        },
+      },
     });
-    return saved;
   }
 
   /** Recarga tareas y re-sincroniza el total del log abierto. */
@@ -210,20 +268,43 @@ export class RoutineService {
     const tasks = await this._repository.listTasks();
     const today = this._store.getState().today;
     const log = await this._repository.ensureLog(today, tasks.length);
-    this._store.setState({
-      tasks,
-      log,
-      history: { ...this._store.getState().history, [log.date]: {
-        completionRate: log.completionRate,
-        completedCount: log.completedCount,
-        totalActiveTasks: log.totalActiveTasks,
-      } },
-    });
+    this._store.setState({ tasks });
+    this._applyLog(log);
     return tasks;
+  }
+
+  /**
+   * Despliega el bloque indicado si estaba plegado. Se usa al guardar: una
+   * tarea que cae en un bloque cerrado desaparecería nada más crearla.
+   * @param {string} section
+   */
+  _expandSection(section) {
+    const collapsed = this._store.getState().ui.collapsedSections;
+    if (!collapsed.includes(section)) return;
+    this._store.patch('ui', { collapsedSections: collapsed.filter((name) => name !== section) });
   }
 
   /** @returns {Promise<boolean>} */
   async _isFirstRun() {
     return !(await this._repository.getMeta('seeded_at'));
   }
+}
+
+/**
+ * Bloques que arrancan plegados: todos menos el de la hora actual.
+ *
+ * Si el bloque de la hora actual no tiene tareas, se deja abierto el primero
+ * que sí las tenga: abrir la app y encontrarla entera plegada parece un error.
+ *
+ * @param {import('./taskValidator.js').TaskDefinition[]} tasks
+ * @param {Date} [now]
+ * @returns {string[]} secciones plegadas.
+ */
+export function defaultCollapsedSections(tasks, now = new Date()) {
+  const withTasks = SECTION_ORDER.filter((section) => tasks.some((task) => task.section === section));
+  if (withTasks.length <= 1) return [];
+
+  const active = currentSection(now);
+  const expanded = withTasks.includes(active) ? active : withTasks[0];
+  return withTasks.filter((section) => section !== expanded);
 }

@@ -35,7 +35,7 @@ export const GESTURE_STATE = Object.freeze({
 /**
  * @typedef {Object} SwipeHandlers
  * @property {(ctx: {direction: number}) => void} [onPanStart]
- * @property {(ctx: {dx: number, ratio: number, direction: number}) => void} [onPan]
+ * @property {(ctx: {dx: number, ratio: number, direction: number, width: number}) => void} [onPan]
  * @property {(ctx: {direction: number, velocity: number, dx: number}) => void} [onCommit]
  * @property {() => void} [onCancel]
  * @property {(ctx: {x: number, y: number, target: EventTarget|null}) => void} [onTap]
@@ -130,6 +130,9 @@ export class SwipeRecognizer {
       dx: this._damp(dx),
       ratio: Math.min(1, Math.abs(dx) / (this._width * this._config.COMMIT_RATIO)),
       direction: Math.sign(dx),
+      // El ancho viaja en el contexto porque la respuesta visual necesita
+      // expresar el recorrido en fracciones del elemento, no en píxeles.
+      width: this._width,
     });
   }
 
@@ -187,16 +190,26 @@ export class SwipeRecognizer {
   }
 
   /**
-   * Resistencia elástica más allá del umbral de confirmación: el elemento
-   * sigue al dedo 1:1 hasta el punto de commit y luego se frena, comunicando
-   * de forma táctil que ya no hace falta arrastrar más.
+   * Fricción logarítmica más allá del 50 % del ancho.
+   *
+   *     dx' = L + k · ln(1 + (|dx| − L) / k),   L = ancho · FRICTION_RATIO
+   *
+   * El elemento sigue al dedo 1:1 mientras el gesto es informativo —incluido
+   * todo el tramo hasta el umbral de disparo del 35 %— y a partir de la mitad
+   * del ancho se frena de forma asintótica. La curva logarítmica no tiene
+   * tope duro (nunca da la sensación de haber chocado) pero su derivada tiende
+   * a cero, así que arrastrar más deja de producir recorrido y el usuario
+   * percibe el límite sin que nada se detenga bruscamente.
    * @param {number} dx
+   * @returns {number} desplazamiento a aplicar al elemento.
    */
   _damp(dx) {
-    const limit = this._width * this._config.COMMIT_RATIO;
-    if (Math.abs(dx) <= limit) return dx;
-    const excess = Math.abs(dx) - limit;
-    return Math.sign(dx) * (limit + excess * this._config.RUBBER_BAND);
+    const limit = this._width * this._config.FRICTION_RATIO;
+    const magnitude = Math.abs(dx);
+    if (magnitude <= limit) return dx;
+    const k = this._config.FRICTION_COEFFICIENT;
+    const excess = magnitude - limit;
+    return Math.sign(dx) * (limit + k * Math.log1p(excess / k));
   }
 }
 

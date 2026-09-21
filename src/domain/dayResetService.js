@@ -109,7 +109,24 @@ export class DayResetService {
       return false;
     }
     const today = toDateKey(this._now());
-    const activeDay = this._store.getState().today;
+    const state = this._store.getState();
+    const lastEvaluated = state.streak.lastEvaluatedDate;
+
+    // Desincronización de reloj: el dispositivo dice que hoy es anterior al
+    // último día ya evaluado. Puede ser un viaje al oeste cruzando la línea de
+    // cambio de fecha, una corrección NTP agresiva o un reloj puesto a mano.
+    // Evaluar ese "pasado" reescribiría logs cerrados y reiniciaría rachas
+    // legítimas, así que el cálculo diario se congela hasta que el reloj
+    // vuelva a ser coherente. El usuario sigue pudiendo marcar tareas: lo que
+    // se detiene es el cierre de días, no la aplicación.
+    if (lastEvaluated !== null && diffDays(lastEvaluated, today) < 0) {
+      this._freeze({ today, lastEvaluated, reason });
+      this._schedule();
+      return false;
+    }
+    if (state.ui.clockDesynced) this._thaw();
+
+    const activeDay = state.today;
     if (today === activeDay) {
       this._schedule();
       return false;
@@ -238,12 +255,40 @@ export class DayResetService {
     return buildHistory(await this._repository.recentLogs(LIMITS.HEATMAP_WEEKS * 7, today));
   }
 
+  /**
+   * Congela el cálculo diario tras detectar un reloj retrasado. Idempotente:
+   * los avisos y el evento se emiten una sola vez por episodio.
+   * @param {{today: string, lastEvaluated: string, reason: string}} context
+   */
+  _freeze({ today, lastEvaluated, reason }) {
+    this.state = RESET_STATE.FROZEN;
+    if (this._store.getState().ui.clockDesynced) return;
+
+    console.warn(
+      `[DayResetService] reloj desincronizado: hoy (${today}) es anterior al último día `
+      + `evaluado (${lastEvaluated}). Cálculo diario congelado; no se alteran logs ni rachas.`,
+    );
+    this._store.patch('ui', { clockDesynced: true });
+    this._bus.emit(EVENTS.CLOCK_DESYNC, { frozen: true, today, lastEvaluated, reason });
+  }
+
+  /** Reanuda el cálculo diario cuando el reloj vuelve a ser coherente. */
+  _thaw() {
+    this._store.patch('ui', { clockDesynced: false });
+    this.state = RESET_STATE.IDLE;
+    this._bus.emit(EVENTS.CLOCK_DESYNC, { frozen: false });
+  }
+
   /** Reprograma el temporizador de medianoche. */
   _schedule() {
     if (!this._running) return;
     if (this._timerId !== null) clearTimeout(this._timerId);
     const delay = Math.min(MAX_TIMEOUT_MS, msUntilNextMidnight(this._now()));
     this._timerId = setTimeout(() => void this.check('timer'), delay);
-    if (this.state !== RESET_STATE.ERROR) this.state = RESET_STATE.SCHEDULED;
+    // ERROR y FROZEN son estados que describen una condición pendiente: el
+    // temporizador se rearma igual, pero no los pisa.
+    if (this.state !== RESET_STATE.ERROR && this.state !== RESET_STATE.FROZEN) {
+      this.state = RESET_STATE.SCHEDULED;
+    }
   }
 }

@@ -21,7 +21,12 @@ import { toDateKey } from './dateUtils.js';
  * @property {import('../domain/streakCalculator.js').StreakState} streak  Estado de racha.
  * @property {Object} preferences       Preferencias de usuario.
  * @property {Object.<string, {completionRate:number, completedCount:number, totalActiveTasks:number}>} history Resumen para el heatmap.
- * @property {{editingTaskId: string|null, editorOpen: boolean, busy: boolean, persistence: 'indexeddb'|'localstorage'|'memory'}} ui
+ * @property {{
+ *   busy: boolean,
+ *   persistence: 'indexeddb'|'localstorage'|'memory',
+ *   collapsedSections: string[],
+ *   clockDesynced: boolean,
+ * }} ui
  */
 
 /** @returns {AppState} */
@@ -43,10 +48,14 @@ export function createInitialState() {
     preferences: { ...DEFAULT_PREFERENCES },
     history: {},
     ui: {
-      editingTaskId: null,
-      editorOpen: false,
       busy: false,
       persistence: 'memory',
+      // Bloques del día plegados. Se calcula en la hidratación: abierto el de
+      // la hora actual, plegados los demás.
+      collapsedSections: [],
+      // El reloj del dispositivo retrocedió respecto al último día evaluado:
+      // el cálculo diario queda congelado hasta que vuelva a ser coherente.
+      clockDesynced: false,
     },
   };
 }

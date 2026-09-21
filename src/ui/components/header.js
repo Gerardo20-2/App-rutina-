@@ -2,6 +2,10 @@
  * @module ui/components/header
  * Barra superior: fecha, progreso del día, racha y escudos.
  *
+ * **Zona pasiva.** La cabecera ocupa el extremo que el pulgar no alcanza sin
+ * recolocar el agarre, así que no contiene ni un solo control: sólo lectura.
+ * Todas las acciones viven en la barra inferior (`bottomBar.js`).
+ *
  * Contrato de componente usado en todo el proyecto:
  *   create*(deps) -> { el: HTMLElement, update(state): void, destroy(): void }
  * El componente construye su DOM una sola vez y `update` sólo escribe texto y
@@ -47,6 +51,8 @@ export function createHeader() {
   const shieldsSr = h('span', { class: 'sr-only' });
   const consistencyEl = h('span', { class: 'stat__score' });
 
+  const warning = h('p', { class: 'header__warning', role: 'status', hidden: true });
+
   const el = h('header', { class: 'header', role: 'banner' }, [
     h('div', { class: 'header__top' }, [
       h('div', { class: 'header__titles' }, [
@@ -70,10 +76,17 @@ export function createHeader() {
         h('dd', { class: 'stat__body' }, [consistencyEl]),
       ]),
     ]),
+    warning,
   ]);
 
   /** @param {import('../../core/store.js').AppState} state */
   function update(state) {
+    warning.hidden = !state.ui.clockDesynced;
+    if (state.ui.clockDesynced) {
+      warning.textContent = 'El reloj del dispositivo va atrasado respecto a tu historial. '
+        + 'El cierre del día está en pausa; tus tareas siguen guardándose.';
+    }
+
     const model = headerModel(state);
     dateEl.textContent = capitalize(formatLongDate(model.date));
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { Repository } from '../src/storage/repository.js';
 import { LocalStorageService, MemoryBackend } from '../src/storage/localStorageService.js';
-import { RoutineService } from '../src/domain/routineService.js';
+import { RoutineService, defaultCollapsedSections } from '../src/domain/routineService.js';
 import { Store, createInitialState } from '../src/core/store.js';
 import { EventBus } from '../src/core/events.js';
 import { LS_KEYS, META_KEYS, DB_VERSION } from '../src/core/constants.js';
@@ -164,14 +164,132 @@ test('migrateLegacy convierte APP_STATE_V1 al esquema v2', async () => {
   }
 });
 
-test('hydrate siembra la rutina inicial en el primer arranque', async () => {
+test('hydrate siembra la rutina de bienvenida en el primer arranque', async () => {
   const { store, service } = await makeApp();
   await service.hydrate();
   const state = store.getState();
   assert.ok(state.ready);
-  assert.ok(state.tasks.length > 0, 'se sembraron tareas de ejemplo');
+  assert.equal(state.tasks.length, 4, 'cuatro hábitos, uno por bloque del día');
   assert.equal(state.log.totalActiveTasks, state.tasks.length);
   assert.equal(state.today, toDateKey());
+
+  const sections = state.tasks.map((task) => task.section);
+  assert.deepEqual([...sections].sort(), ['afternoon', 'anytime', 'evening', 'morning']);
+  assert.ok(state.tasks.every((task) => task.title.length > 0));
+});
+
+test('la siembra sólo ocurre una vez', async () => {
+  const { store, service, repository } = await makeApp();
+  await service.hydrate();
+  await service.archiveTask(store.getState().tasks[0].id);
+  assert.equal(store.getState().tasks.length, 3);
+
+  // Un segundo arranque no debe resucitar la rutina de ejemplo.
+  await service.hydrate();
+  assert.equal(store.getState().tasks.length, 3, 'no se vuelve a sembrar');
+  assert.ok(await repository.getMeta('seeded_at'));
+});
+
+test('al arrancar sólo queda abierto el bloque de la hora actual', async () => {
+  const { store, service } = await makeApp();
+  await service.hydrate();
+  const { tasks, ui } = store.getState();
+  const sections = [...new Set(tasks.map((task) => task.section))];
+  assert.equal(ui.collapsedSections.length, sections.length - 1, 'un único bloque desplegado');
+  assert.ok(ui.collapsedSections.every((section) => sections.includes(section)));
+});
+
+test('toggleSection pliega y despliega', async () => {
+  const { store, service, bus } = await makeApp();
+  await service.hydrate();
+  const events = [];
+  bus.on('ui:section-toggled', (payload) => events.push(payload));
+
+  const open = ['morning', 'afternoon', 'evening', 'anytime']
+    .find((section) => !store.getState().ui.collapsedSections.includes(section));
+
+  service.toggleSection(open);
+  assert.ok(store.getState().ui.collapsedSections.includes(open), 'se plegó');
+  service.toggleSection(open);
+  assert.ok(!store.getState().ui.collapsedSections.includes(open), 'se volvió a desplegar');
+  assert.deepEqual(events.map((event) => event.collapsed), [true, false]);
+});
+
+test('guardar una tarea despliega su bloque', async () => {
+  const { store, service } = await makeApp();
+  await service.hydrate();
+  const collapsed = store.getState().ui.collapsedSections[0];
+  assert.ok(collapsed, 'hay al menos un bloque plegado');
+
+  await service.saveTask({ title: 'Tarea nueva en bloque plegado', section: collapsed });
+  assert.ok(!store.getState().ui.collapsedSections.includes(collapsed),
+    'el bloque de destino queda visible tras guardar');
+});
+
+test('defaultCollapsedSections deja abierto el bloque de la hora', () => {
+  const tasks = [
+    { section: 'morning' }, { section: 'afternoon' }, { section: 'evening' }, { section: 'anytime' },
+  ];
+  assert.deepEqual(
+    defaultCollapsedSections(tasks, new Date(2026, 8, 21, 8)),
+    ['afternoon', 'evening', 'anytime'],
+  );
+  assert.deepEqual(
+    defaultCollapsedSections(tasks, new Date(2026, 8, 21, 21)),
+    ['morning', 'afternoon', 'anytime'],
+  );
+});
+
+test('defaultCollapsedSections abre el primer bloque con tareas si el actual está vacío', () => {
+  // Media tarde, pero sólo hay tareas de noche: plegarlo todo parecería un error.
+  const tasks = [{ section: 'evening' }, { section: 'anytime' }];
+  assert.deepEqual(defaultCollapsedSections(tasks, new Date(2026, 8, 21, 15)), ['anytime']);
+});
+
+test('defaultCollapsedSections no pliega nada si sólo hay un bloque', () => {
+  assert.deepEqual(defaultCollapsedSections([{ section: 'morning' }], new Date(2026, 8, 21, 20)), []);
+  assert.deepEqual(defaultCollapsedSections([], new Date(2026, 8, 21, 20)), []);
+});
+
+test('toggleTask actualiza el store antes de que resuelva la escritura', async () => {
+  const { store, service, repository } = await makeApp();
+  await service.hydrate();
+  const [task] = store.getState().tasks;
+
+  // Escritura artificialmente lenta: el store no debe esperarla.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const original = repository.saveLog.bind(repository);
+  repository.saveLog = async (log) => {
+    await gate;
+    return original(log);
+  };
+
+  const pending = service.toggleTask(task.id);
+  await Promise.resolve();
+  assert.equal(store.getState().log.completedCount, 1, 'el store ya refleja la marca');
+
+  release();
+  await pending;
+  assert.equal(store.getState().log.completedCount, 1);
+  assert.equal((await repository.getLog(store.getState().today)).completedCount, 1);
+});
+
+test('una escritura fallida revierte el estado optimista', async () => {
+  const { store, service, repository, bus } = await makeApp();
+  await service.hydrate();
+  const [task] = store.getState().tasks;
+  const before = store.getState().log;
+
+  const failures = [];
+  bus.on('app:error', (payload) => failures.push(payload));
+  repository.saveLog = async () => { throw new Error('cuota agotada'); };
+
+  await assert.rejects(() => service.toggleTask(task.id), /cuota agotada/);
+  assert.equal(store.getState().log, before, 'el log vuelve a ser exactamente el anterior');
+  assert.equal(store.getState().log.completedCount, 0);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].scope, 'write-entry');
 });
 
 test('toggleTask persiste y recalcula el ratio del día', async () => {

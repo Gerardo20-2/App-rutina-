@@ -1,8 +1,9 @@
 /**
  * Prueba de humo end-to-end sobre Chromium.
  *
- * Cubre lo que las pruebas de dominio no pueden: render real, gestos,
- * IndexedDB del navegador, canvas del heatmap, Service Worker y arranque sin
+ * Cubre lo que las pruebas de dominio no pueden: render real, ergonomía de la
+ * zona del pulgar, gestos, hojas deslizantes, IndexedDB del navegador, canvas
+ * del heatmap, alcance del Service Worker con rutas relativas y arranque sin
  * conexión.
  *
  * Playwright NO es una dependencia del proyecto: esta prueba es opcional y no
@@ -11,8 +12,9 @@
  *     npm install --no-save playwright && npx playwright install chromium
  *     node tests/e2e/smoke.mjs
  *
- * El servidor estático se levanta aquí mismo con `node:http`, así que no hay
- * nada más que preparar.
+ * El servidor estático se levanta aquí mismo con `node:http`. Sirve la app
+ * bajo un **subdirectorio** (`/App-rutina-/`) a propósito: es como la publica
+ * GitHub Pages, y es justo donde una ruta absoluta se rompería.
  */
 
 import { createServer } from 'node:http';
@@ -24,6 +26,8 @@ const { chromium } = await import('playwright');
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const PORT = Number(process.env.PORT ?? 8123);
+/** Prefijo de despliegue, igual que en GitHub Pages. */
+const BASE_PATH = '/App-rutina-/';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -38,7 +42,14 @@ const MIME = {
 
 const server = createServer(async (req, res) => {
   const requested = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
-  const relative = normalize(requested === '/' ? '/index.html' : requested).replace(/^(\.\.[/\\])+/, '');
+  if (!requested.startsWith(BASE_PATH)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('fuera del subdirectorio de despliegue');
+    return;
+  }
+  const withinApp = requested.slice(BASE_PATH.length) || 'index.html';
+  const relative = normalize(withinApp.endsWith('/') ? `${withinApp}index.html` : withinApp)
+    .replace(/^(\.\.[/\\])+/, '');
   const filePath = join(ROOT, relative);
   try {
     const body = await readFile(filePath);
@@ -54,12 +65,15 @@ const server = createServer(async (req, res) => {
 });
 
 await new Promise((done) => server.listen(PORT, '127.0.0.1', done));
-const BASE = `http://127.0.0.1:${PORT}`;
+const BASE = `http://127.0.0.1:${PORT}${BASE_PATH}`;
 console.log(`Sirviendo ${ROOT} en ${BASE}`);
 
 /** @type {string[]} */
 const errors = [];
-const check = (condition, message) => { if (!condition) errors.push(message); };
+const check = (condition, message) => {
+  if (!condition) errors.push(message);
+  return Boolean(condition);
+};
 
 const browser = await chromium.launch();
 const context = await browser.newContext({
@@ -77,51 +91,143 @@ try {
   await page.goto(BASE, { waitUntil: 'networkidle' });
   await page.waitForSelector('.header__title', { timeout: 10_000 });
 
-  // 1. Arranque: motor de persistencia y siembra inicial.
+  // ── 1. Arranque en frío: motor y rutina de bienvenida ──────────────────
   const engine = await page.textContent('.settings__engine');
   console.log('motor de persistencia:', engine);
   check(engine === 'IndexedDB', `se esperaba IndexedDB, hay "${engine}"`);
 
   const seeded = await page.locator('.task').count();
-  console.log('tareas sembradas:', seeded);
-  check(seeded > 0, 'no se sembró ninguna tarea');
+  const seededSections = await page.locator('.section').count();
+  const seededTitles = await page.locator('.task__title').allTextContents();
+  console.log('tareas de bienvenida:', seeded, seededTitles);
+  check(seeded === 4, `se esperaban 4 tareas de bienvenida, hay ${seeded}`);
+  check(seededSections === 4, `se esperaba una tarea por bloque, hay ${seededSections} bloques`);
   check(!(await page.locator('.empty').isVisible()), 'el estado vacío se muestra con tareas presentes');
 
-  // 2. Completar una tarea actualiza el anillo de progreso.
-  const before = await page.textContent('.ring__label');
-  await page.locator('.task').first().locator('.task__check').click();
+  // ── 2. Zona del pulgar: acciones abajo, cabecera pasiva ────────────────
+  const ergonomics = await page.evaluate(() => {
+    const bar = document.querySelector('.bar').getBoundingClientRect();
+    const fab = document.querySelector('.fab').getBoundingClientRect();
+    const header = document.querySelector('.header');
+    const smallTargets = [...document.querySelectorAll(
+      '.bar__btn, .fab, .task__edit, .section__toggle, .sheet__close',
+    )]
+      .filter((node) => node.offsetParent !== null)
+      .map((node) => ({ cls: node.className, rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width < 48 || rect.height < 48)
+      .map(({ cls, rect }) => `${cls} ${Math.round(rect.width)}×${Math.round(rect.height)}`);
+    return {
+      barBottom: Math.round(bar.bottom),
+      barTop: Math.round(bar.top),
+      viewport: window.innerHeight,
+      fab: `${Math.round(fab.width)}×${Math.round(fab.height)}`,
+      headerControls: header.querySelectorAll('button, a, input, select').length,
+      smallTargets,
+    };
+  });
+  console.log('ergonomía:', ergonomics);
+  check(ergonomics.barBottom >= ergonomics.viewport - 1, 'la barra de acciones no está anclada al borde inferior');
+  check(ergonomics.barTop > ergonomics.viewport * 0.75, 'la barra invade más del cuarto inferior de la pantalla');
+  check(ergonomics.fab === '56×56', `el FAB mide ${ergonomics.fab}, se esperaban 56×56`);
+  check(ergonomics.headerControls === 0, 'la cabecera contiene controles: debe ser zona de lectura pasiva');
+  check(ergonomics.smallTargets.length === 0, `objetivos táctiles por debajo de 48 px: ${ergonomics.smallTargets.join(', ')}`);
+
+  // ── 3. Bloques plegables: sólo el de la hora actual abierto ────────────
+  const collapsed = await page.locator('.section[data-collapsed="true"]').count();
+  console.log('bloques plegados al arrancar:', collapsed, 'de', seededSections);
+  check(collapsed === seededSections - 1, `se esperaba un único bloque abierto, hay ${seededSections - collapsed}`);
+
+  // Los localizadores se anclan al nombre del bloque: `[data-collapsed="true"]`
+  // deja de coincidir en cuanto se despliega y apuntaría a otro bloque.
+  const openName = await page.locator('.section[data-collapsed="false"]').first().getAttribute('data-section');
+  const collapsedName = await page.locator('.section[data-collapsed="true"]').first().getAttribute('data-section');
+  const openSection = page.locator(`.section[data-section="${openName}"]`);
+  const secondSection = page.locator(`.section[data-section="${collapsedName}"]`);
+  console.log('bloque abierto:', openName, '· bloque a desplegar:', collapsedName);
+
+  await secondSection.locator('.section__toggle').click();
   await page.waitForTimeout(150);
+  check(await secondSection.getAttribute('data-collapsed') === 'false', 'el bloque no se desplegó al tocarlo');
+  check(await secondSection.locator('.section__toggle').getAttribute('aria-expanded') === 'true',
+    'aria-expanded no refleja el estado del bloque');
+
+  await secondSection.locator('.section__toggle').click();
+  await page.waitForTimeout(150);
+  check(await secondSection.getAttribute('data-collapsed') === 'true', 'el bloque no se volvió a plegar');
+  await secondSection.locator('.section__toggle').click();
+  await page.waitForTimeout(150);
+
+  // ── 4. Completar una tarea: UI optimista y progreso ────────────────────
+  const firstTask = openSection.locator('.task').first();
+  const before = await page.textContent('.ring__label');
+  await firstTask.locator('.task__check').click();
+  // La clase se aplica en el frame del gesto, antes de que resuelva IndexedDB.
+  check((await firstTask.getAttribute('class')).includes('task--done'),
+    'la tarea no se marcó de forma optimista');
+  await page.waitForTimeout(200);
   const after = await page.textContent('.ring__label');
   console.log('progreso:', before, '→', after);
   check(before !== after, 'el anillo de progreso no cambió al completar');
-  check((await page.locator('.task').first().getAttribute('class')).includes('task--done'),
-    'la tarea no quedó marcada como completada');
 
-  // 3. Swipe izquierdo dispensa la tarea.
-  const second = page.locator('.task').nth(1);
-  const box = await second.boundingBox();
-  await page.mouse.move(box.x + box.width - 30, box.y + box.height / 2);
+  // ── 5. Swipe izquierdo: dispensar (en el otro bloque, para no deshacer
+  //     la tarea recién completada) ─────────────────────────────────────
+  const skipTarget = secondSection.locator('.task').first();
+  const box = await skipTarget.boundingBox();
+  if (check(box !== null, 'no se pudo medir la tarea para el gesto')) {
+    await page.mouse.move(box.x + box.width - 30, box.y + box.height / 2);
+    await page.mouse.down();
+    for (let step = 1; step <= 10; step += 1) {
+      await page.mouse.move(box.x + box.width - 30 - step * 20, box.y + box.height / 2);
+    }
+    await page.mouse.up();
+    await page.waitForTimeout(280);
+    check((await skipTarget.getAttribute('class')).includes('task--skipped'),
+      'el swipe izquierdo no dispensó la tarea');
+  }
+
+  // ── 6. Hoja inferior: apertura, arrastre de cierre y foco ──────────────
+  const sheet = page.locator('#sheet-editor');
+  check(await sheet.isHidden(), 'la hoja del editor no arranca oculta');
+  await page.click('.fab');
+  await page.waitForSelector('#sheet-editor.is-open', { timeout: 3000 });
+  await page.waitForTimeout(320); // deja asentar la animación de entrada
+  check(await sheet.isVisible(), 'la hoja no se abrió al pulsar el FAB');
+  check(await sheet.locator('.sheet__panel').getAttribute('aria-modal') === 'true',
+    'la hoja no se anuncia como diálogo modal');
+
+  // Cierre por arrastre hacia abajo desde la cabecera.
+  const header = await sheet.locator('.sheet__header').boundingBox();
+  await page.mouse.move(header.x + header.width / 2, header.y + header.height / 2);
   await page.mouse.down();
-  for (let step = 1; step <= 10; step += 1) {
-    await page.mouse.move(box.x + box.width - 30 - step * 20, box.y + box.height / 2);
+  for (let step = 1; step <= 8; step += 1) {
+    await page.mouse.move(header.x + header.width / 2, header.y + header.height / 2 + step * 40);
   }
   await page.mouse.up();
-  await page.waitForTimeout(250);
-  check((await second.getAttribute('class')).includes('task--skipped'),
-    'el swipe izquierdo no dispensó la tarea');
+  await page.waitForTimeout(400);
+  check(await sheet.isHidden(), 'la hoja no se cerró al arrastrarla hacia abajo');
 
-  // 4. Alta de tarea desde el botón flotante.
+  // Cierre con Escape.
   await page.click('.fab');
-  await page.waitForSelector('.dialog[open]');
-  await page.fill('#task-title', 'Tarea de prueba E2E');
-  await page.selectOption('#task-section', 'afternoon');
-  await page.fill('#task-minutes', '12');
-  await page.click('.dialog__form button[type=submit]');
-  await page.waitForTimeout(300);
-  const created = await page.locator('.task').count();
-  check(created === seeded + 1, 'la tarea nueva no apareció en la lista');
+  await page.waitForSelector('#sheet-editor.is-open');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+  check(await sheet.isHidden(), 'la hoja no se cerró con Escape');
 
-  // 5. El heatmap pinta píxeles reales.
+  // ── 7. Alta de tarea desde la hoja ─────────────────────────────────────
+  await page.click('.fab');
+  await page.waitForSelector('#sheet-editor.is-open');
+  await page.fill('#task-title', 'Tarea de prueba E2E');
+  await page.click('label[for="section-afternoon"]');
+  await page.fill('#task-minutes', '12');
+  await page.click('#sheet-editor button[type=submit]');
+  await page.waitForTimeout(400);
+  const created = await page.locator('.task').count();
+  check(created === seeded + 1, `la tarea nueva no apareció en la lista (${created} vs ${seeded + 1})`);
+  check(await sheet.isHidden(), 'la hoja no se cerró tras guardar');
+
+  // ── 8. Hojas de histórico y ajustes ────────────────────────────────────
+  await page.click('.bar__btn >> nth=0');
+  await page.waitForSelector('#sheet-history.is-open');
   const heatmap = await page.evaluate(() => {
     const canvas = document.querySelector('.heatmap__canvas');
     const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
@@ -130,15 +236,23 @@ try {
     return { width: canvas.width, height: canvas.height, painted };
   });
   console.log('heatmap:', heatmap);
-  check(heatmap.painted > 0, 'el heatmap no dibujó ningún píxel');
+  check(heatmap.painted > 0, 'el heatmap no dibujó ningún píxel dentro de la hoja');
+  await page.click('#sheet-history .sheet__close');
+  await page.waitForTimeout(400);
 
-  // 6. Persistencia tras recargar.
+  await page.click('.bar__btn >> nth=1');
+  await page.waitForSelector('#sheet-settings.is-open');
+  check(await page.locator('#sheet-settings .settings').isVisible(), 'los ajustes no se muestran en su hoja');
+  await page.click('#sheet-settings .sheet__close');
+  await page.waitForTimeout(400);
+
+  // ── 9. Persistencia tras recargar ──────────────────────────────────────
   await page.reload({ waitUntil: 'networkidle' });
-  await page.waitForSelector('.task');
+  await page.waitForSelector('.section');
   check(await page.locator('.task').count() === created, 'las tareas no persistieron tras recargar');
-  check(await page.locator('.task--done').count() === 1, 'el estado completado no persistió');
+  check(await page.locator('.task--done').count() >= 1, 'el estado completado no persistió');
 
-  // 7. Service Worker: alcance raíz y precaché completo.
+  // ── 10. Service Worker: alcance relativo al subdirectorio ──────────────
   const sw = await page.evaluate(async () => {
     if (!('serviceWorker' in navigator)) return { supported: false };
     const registration = await navigator.serviceWorker.ready;
@@ -147,30 +261,55 @@ try {
     return {
       supported: true,
       scope: registration.scope,
+      script: registration.active?.scriptURL,
       cache: name,
       cached: keys.length,
+      sample: keys.slice(0, 2).map((request) => request.url),
       controlled: Boolean(navigator.serviceWorker.controller),
     };
   });
   console.log('service worker:', sw);
   check(sw.supported, 'el navegador no soporta Service Worker');
-  check(sw.scope?.endsWith('/'), `alcance inesperado: ${sw.scope}`);
+  check(sw.scope?.endsWith(BASE_PATH), `el alcance debería ser ${BASE_PATH}, es ${sw.scope}`);
+  check(sw.script?.endsWith(`${BASE_PATH}sw.js`), `script inesperado: ${sw.script}`);
   check(sw.cached >= 30, `precaché incompleto: ${sw.cached} recursos`);
+  check((sw.sample ?? []).every((url) => url.includes(BASE_PATH)),
+    `el precaché no está bajo el subdirectorio: ${(sw.sample ?? []).join(', ')}`);
 
-  // 8. Arranque sin conexión.
+  // ── 11. Manifest: rutas resueltas bajo el subdirectorio ────────────────
+  const manifest = await page.evaluate(async () => {
+    const href = document.querySelector('link[rel=manifest]').href;
+    const raw = await (await fetch(href)).json();
+    return {
+      href,
+      start: new URL(raw.start_url, href).pathname,
+      scope: new URL(raw.scope, href).pathname,
+      icon: new URL(raw.icons[0].src, href).pathname,
+    };
+  });
+  console.log('manifest:', manifest);
+  check(manifest.start === `${BASE_PATH}index.html`, `start_url resuelve a ${manifest.start}`);
+  check(manifest.scope === BASE_PATH, `scope resuelve a ${manifest.scope}`);
+  check(manifest.icon === `${BASE_PATH}public/icons/icon-192.png`, `icono resuelve a ${manifest.icon}`);
+
+  // ── 12. Arranque sin conexión ──────────────────────────────────────────
   await context.setOffline(true);
   await page.reload({ waitUntil: 'load' });
-  await page.waitForSelector('.task', { timeout: 10_000 });
+  await page.waitForSelector('.section', { timeout: 10_000 });
   check(await page.locator('.task').count() === created, 'la aplicación no arranca sin conexión');
   await context.setOffline(false);
 
-  // 9. Volcado de copia de seguridad.
+  // ── 13. Volcado de copia de seguridad ──────────────────────────────────
   const dump = await page.evaluate(async () => {
     const backup = await globalThis.__routineTracker.repository.exportBackup();
     return { schema: backup.schema, tasks: backup.data.tasks.length, logs: backup.data.daily_logs.length };
   });
   console.log('backup:', dump);
   check(dump.schema === 2, 'el volcado no declara el esquema 2');
+
+  if (process.env.SCREENSHOT_DIR) {
+    await page.screenshot({ path: `${process.env.SCREENSHOT_DIR}/e2e-claro.png`, fullPage: true });
+  }
 } finally {
   await browser.close();
   server.close();

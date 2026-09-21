@@ -18,7 +18,9 @@
 4. [Algoritmo de racha resiliente](#4-algoritmo-de-racha-resiliente)
 5. [Máquina de estados del corte de día](#5-máquina-de-estados-del-corte-de-día)
 6. [Máquina de estados del reconocedor de gestos](#6-máquina-de-estados-del-reconocedor-de-gestos)
+6 bis. [Hoja inferior y ergonomía del pulgar](#6-bis-hoja-inferior-y-ergonomía-del-pulgar)
 7. [Ciclo de vida del Service Worker](#7-ciclo-de-vida-del-service-worker)
+7 bis. [Resolución de rutas en subdirectorios](#7-bis-resolución-de-rutas-en-subdirectorios)
 8. [Contratos de módulo](#8-contratos-de-módulo)
 9. [Taxonomía de errores](#9-taxonomía-de-errores)
 10. [Presupuestos de rendimiento](#10-presupuestos-de-rendimiento)
@@ -323,7 +325,30 @@ Implementación: `src/domain/dayResetService.js`.
                                               ▼
                                            ERROR ── se reintenta en el
                                                      siguiente disparo
+
+   check() con  hoy < lastEvaluatedDate  ──▶ FROZEN
+   FROZEN con   hoy ≥ lastEvaluatedDate  ──▶ IDLE (se descongela y continúa)
 ```
+
+### 5.0. Congelación por reloj desincronizado
+
+Antes de cualquier otra decisión, `check()` compara el día actual con
+`streak.lastEvaluatedDate`. Si el dispositivo dice que hoy es **anterior** al
+último día ya evaluado —viaje al oeste cruzando la línea de cambio de fecha,
+corrección NTP agresiva, reloj puesto a mano— evaluar ese "pasado"
+reescribiría logs cerrados y reiniciaría rachas legítimas.
+
+En ese caso el servicio pasa a `FROZEN` y:
+
+| | |
+|---|---|
+| **No** altera | logs, racha, escudos, `lastEvaluatedDate` ni el día activo del store |
+| **Sí** hace | registrar la advertencia, marcar `ui.clockDesynced`, emitir `app:clock-desync` una sola vez y avisar en la cabecera |
+| **Sigue funcionando** | marcar, dispensar, crear y editar tareas: lo que se detiene es el cierre de días, no la aplicación |
+
+El deshielo es automático: en cuanto una comprobación encuentra el reloj por
+delante del último día evaluado, se limpia la marca y el corte pendiente se
+ejecuta en esa misma pasada.
 
 ### 5.1. Por qué cuatro disparadores
 
@@ -340,7 +365,8 @@ al mismo resultado.
 |---|---|
 | App cerrada varios días | `bootstrap` llama a `check()` antes de `start()`: el hueco se reconcilia en el arranque |
 | Reloj adelantado | Se procesa el hueco; más de 400 días se trunca y rompe la racha |
-| Reloj atrasado | No se reevalúa el pasado: sólo se reapunta el día activo y se recarga lo persistido |
+| Reloj atrasado por debajo del último día evaluado | `FROZEN`: nada se altera, aviso en cabecera, deshielo automático (§ 5.0) |
+| Reloj atrasado dentro del rango ya evaluado | No se reevalúa el pasado: sólo se reapunta el día activo y se recarga lo persistido |
 | Dos disparos simultáneos | `_inFlight` serializa: el segundo espera al primero y no vuelve a evaluar |
 | Fallo de escritura | Estado `ERROR`, evento `app:error`, reintento en el siguiente disparo |
 | Medianoche con la app abierta y una tarea a medio arrastrar | El gesto se cancela al reconciliar la lista por clave; el día nuevo empieza limpio |
@@ -384,8 +410,38 @@ código para ratón, dedo y lápiz).
 | `PAN_THRESHOLD` | 12 px | Umbral de entrada en pan; menor produciría falsos positivos al hacer scroll |
 | `COMMIT_RATIO` | 0.35 | Fracción del ancho que confirma la acción |
 | `FLING_VELOCITY` | 0.45 px/ms | Permite confirmar con un gesto corto y rápido |
-| `RUBBER_BAND` | 0.35 | Resistencia elástica pasado el punto de confirmación |
+| `FRICTION_RATIO` | 0.5 | A partir de aquí el arrastre entra en fricción |
+| `FRICTION_COEFFICIENT` | 48 px | Coeficiente `k` de la curva logarítmica |
 | `SETTLE_MS` | 180 ms | Duración del retorno; se anula con `prefers-reduced-motion` |
+
+**Fricción logarítmica.** Con `L = ancho · FRICTION_RATIO`:
+
+```
+dx' = dx                                  si |dx| ≤ L
+dx' = sign(dx) · (L + k · ln(1 + (|dx| − L)/k))   si |dx| > L
+```
+
+El elemento sigue al dedo 1:1 mientras el gesto es informativo —incluido todo
+el tramo hasta el umbral de disparo del 35 %— y a partir de la mitad del ancho
+se frena de forma asintótica. Frente a una resistencia lineal, la curva
+logarítmica no introduce un tope duro (nunca da la sensación de haber chocado)
+pero su derivada tiende a cero, así que arrastrar más deja de producir
+recorrido. En un ítem de 360 px, un arrastre de 400 px se traduce en 262 px de
+desplazamiento.
+
+**Contrato visual con el CSS.** `touchTaskItem.js` no aplica estilos: publica
+estado en el anfitrión y la hoja de estilos decide.
+
+| Propiedad | Valor |
+|---|---|
+| `data-swipe` | `"complete"` \| `"skip"` — dirección activa |
+| `data-armed` | `"1"` cuando soltar dispararía la acción |
+| `--swipe-progress` | 0 … 1, avance hacia el umbral de disparo (35 %) |
+| `--swipe-overshoot` | 0 … 1, tramo entre el umbral y el inicio de la fricción (35 % → 50 %) |
+
+`--swipe-overshoot` existe porque `--swipe-progress` satura en 1 justo cuando
+el gesto entra en su fase más expresiva; sin él, el CSS se quedaría sin señal
+para el último tramo.
 
 **Bloqueo de eje.** Una vez elegido el eje no se reevalúa durante el gesto. Sin
 esta regla, un swipe diagonal en una lista vertical descartaría tareas mientras
@@ -398,6 +454,92 @@ listener como no pasivo).
 absorber el jitter de los últimos píxeles antes de levantar el dedo.
 
 ---
+
+## 6 bis. Hoja inferior y ergonomía del pulgar
+
+### 6bis.1. Reparto de la pantalla
+
+En un teléfono de 6,1"–6,7" sujetado con una mano, el arco cómodo del pulgar
+cubre el tercio inferior. La aplicación reparte la pantalla en tres franjas con
+una regla dura:
+
+| Franja | Contenido | Regla |
+|---|---|---|
+| Superior | `header.js` | **Cero controles.** Sólo fecha, racha, escudos, consistencia, anillo de progreso y el aviso de reloj desincronizado |
+| Central | `taskList.js` | La rutina. Los gestos ocurren aquí, donde el dedo ya está apoyado |
+| Inferior | `bottomBar.js` | **Todas** las acciones: histórico (izquierda), añadir (centro, 56 px), ajustes (derecha) |
+
+La regla de la cabecera no es una convención de estilo: la prueba end-to-end
+cuenta `header.querySelectorAll('button, a, input, select')` y falla si no da
+cero.
+
+### 6bis.2. Objetivos táctiles
+
+Mínimo **48 × 48 px** (WCAG 2.2, criterio 2.5.8, nivel AA) en todo lo tocable:
+`.bar__btn`, `.fab`, `.task__edit`, `.section__toggle`, `.sheet__close`,
+campos de formulario y opciones del control segmentado.
+
+Donde el elemento visible debe ser menor —el círculo de completar mide 28 px
+por diseño— el área se amplía con un pseudoelemento centrado de 48 px sin
+tocar el dibujo:
+
+```css
+.task__check::after {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: var(--tap); height: var(--tap);
+  transform: translate(-50%, -50%);
+}
+```
+
+La prueba end-to-end mide cada control renderizado y enumera los que bajen del
+mínimo.
+
+### 6bis.3. Máquina de estados de la hoja
+
+```
+   CLOSED ──open()──▶ OPENING ──rAF──▶ OPEN
+   OPEN ──pointerdown en cabecera o asa──▶ DRAGGING
+   DRAGGING ──recorrido ≥ 30 % de la altura, o v ≥ 0,5 px/ms──▶ CLOSING
+   DRAGGING ──por debajo del umbral──▶ OPEN (vuelve a su sitio)
+   OPEN ──Escape | clic en el fondo | close()──▶ CLOSING ──▶ CLOSED
+```
+
+| Parámetro | Valor | Razón |
+|---|---|---|
+| `DISMISS_RATIO` | 0.3 | Fracción de la altura que confirma el cierre |
+| `DISMISS_VELOCITY` | 0.5 px/ms | Cierre por gesto rápido |
+| `DISMISS_MIN_PX` | 24 px | Recorrido mínimo para que el gesto rápido cuente |
+| `UPWARD_RESISTANCE` | 0.12 | La hoja no sube: el tope se nota sin bloquearse |
+| `TRANSITION_MS` | 260 ms | Sincronizado con el CSS |
+
+Detalles que el gesto obliga a manejar:
+
+- **El arrastre nace sólo en la cabecera.** Escuchando en todo el panel, un
+  scroll dentro del contenido arrastraría la hoja entera.
+- **Arrastre a mitad de animación.** El usuario puede agarrar la hoja mientras
+  aún está entrando. El arrastre parte del desplazamiento real del panel,
+  leído de la matriz de su `transform` computado, no de cero: sin eso, la hoja
+  daría un salto y el umbral de cierre se mediría sobre una posición que el
+  usuario no ve.
+- **Accesibilidad.** `role="dialog"`, `aria-modal="true"`, foco atrapado
+  mientras está abierta, devolución del foco al elemento que la abrió y
+  bloqueo del scroll de fondo (`html.has-sheet`), liberado por la última hoja
+  que se cierra.
+
+### 6bis.4. Bloques plegables
+
+`defaultCollapsedSections(tasks, now)` es pura y determinista: deja abierto el
+bloque correspondiente a la hora actual y pliega el resto. Dos casos límite:
+
+- Si el bloque de la hora actual no tiene tareas, se abre el primero que sí las
+  tenga: abrir la aplicación y encontrarla entera plegada parece un error.
+- Con un solo bloque con tareas no se pliega nada.
+
+El plegado es estado de interfaz, no de dominio: no se persiste. Guardar una
+tarea en un bloque plegado lo despliega, o la tarea recién creada desaparecería
+nada más guardarla.
 
 ## 7. Ciclo de vida del Service Worker
 
@@ -430,6 +572,59 @@ La coherencia de `PRECACHE_URLS` con el árbol real se verifica en CI
 silencioso que sólo se manifiesta sin conexión.
 
 ---
+
+## 7 bis. Resolución de rutas en subdirectorios
+
+GitHub Pages publica en `https://<usuario>.github.io/<repo>/`. Una ruta
+absoluta apunta a la raíz del dominio, fuera del despliegue, y devuelve 404.
+El repositorio no contiene ni una.
+
+| Elemento | Base contra la que resuelve | Valor |
+|---|---|---|
+| `index.html` | el documento | `./src/...`, `./public/...` |
+| Imports ES Modules | el módulo que importa | `../core/constants.js` |
+| Registro del SW | el documento | `register('./sw.js', { scope: './' })` |
+| `sw.js` raíz | el worker | `importScripts('./public/sw.js')` |
+| `ASSETS_TO_CACHE` | **`self.registration.scope`** | `'./src/main.js'` → `/<repo>/src/main.js` |
+| `manifest.webmanifest` | **el propio manifest** | vive en `public/`, luego `../index.html` y `../` |
+| Iconos del manifest | el propio manifest | `icons/icon-192.png` (ya está en `public/`) |
+
+### 7bis.1. El caso del manifest
+
+Los valores `"./index.html"` y `"./"` son correctos **si el manifest está en la
+raíz**. Este vive en `public/` por arquitectura, y ahí resolverían a
+`/<repo>/public/index.html` —que no existe— y a un *scope* `/<repo>/public/`
+que deja la aplicación fuera, con lo que el navegador ignora el manifest y la
+PWA deja de ser instalable.
+
+`"../index.html"` y `"../"` producen exactamente las URLs pretendidas:
+
+```
+manifest:   https://usuario.github.io/App-rutina-/public/manifest.webmanifest
+start_url:  ../index.html  ->  https://usuario.github.io/App-rutina-/index.html
+scope:      ../            ->  https://usuario.github.io/App-rutina-/
+icon:       icons/…        ->  https://usuario.github.io/App-rutina-/public/icons/…
+```
+
+### 7bis.2. Alcance del Service Worker
+
+El alcance máximo de un worker es su propio directorio, y GitHub Pages no
+permite enviar `Service-Worker-Allowed`. De ahí el `sw.js` de tres líneas en la
+raíz. El `scope: './'` explícito del registro no amplía nada —coincide con el
+máximo permitido— pero deja la intención escrita y falla ruidosamente si
+alguien mueve el archivo.
+
+Dentro del worker, `APP_SCOPE = self.registration.scope` es la única fuente
+fiable de la raíz: el mismo código sirve para `/`, `/App-rutina-/` o cualquier
+subruta, y el `fetch` ignora lo que caiga fuera de ese prefijo (otra aplicación
+publicada en el mismo dominio de Pages no es asunto de este worker).
+
+### 7bis.3. Verificación
+
+| Capa | Comprobación |
+|---|---|
+| CI, sin navegador | `tests/deployPaths.test.js`: ninguna ruta absoluta en HTML, CSS, imports, manifest ni precaché; resolución del manifest bajo `/App-rutina-/` |
+| Navegador real | `tests/e2e/smoke.mjs` sirve la app **bajo subdirectorio** y comprueba alcance del SW, URLs del precaché y campos del manifest ya resueltos |
 
 ## 8. Contratos de módulo
 
@@ -468,9 +663,34 @@ ordenados por esa clave en los dos motores.
 | `exportBackup()` / `importBackup(payload)` | Volcado JSON | — |
 | `wipe()` | Borrado total y rehidratación | — |
 
-**Orden invariante de todo comando: persistir → actualizar store → emitir
-evento.** Si la escritura falla, el store no llega a mostrar un estado que no
-está guardado.
+**Orden de todo comando: persistir → actualizar store → emitir evento.** Si la
+escritura falla, el store no llega a mostrar un estado que no está guardado.
+
+`toggleSection(section)` es la excepción trivial: pliega o despliega un bloque
+y no toca la persistencia, porque es estado de interfaz.
+
+### 8.2.1. Escritura optimista de `toggleTask` y `skipTask`
+
+Estos dos comandos **invierten** el orden a propósito: publican el log
+recalculado en el store antes de esperar a IndexedDB.
+
+```
+optimista:   store.setState(log recalculado)   ← el render ya puede ocurrir
+             await repository.saveLog(log)
+éxito:       store.setState(log persistido)
+fallo:       store.setState(log anterior) + app:error + throw
+```
+
+Marcar una tarea es la interacción más frecuente de la aplicación y llega por
+gesto táctil. Una transacción tarda entre 5 y 60 ms en un móvil con la batería
+baja, y ese retardo entre el dedo y el tachado se percibe como que la
+aplicación "no ha registrado" el toque. La reversión acota el riesgo: el store
+sólo puede mentir durante una escritura fallida, y cuando ocurre se revierte y
+se avisa.
+
+La capa de presentación hace lo propio: `taskItem.js` aplica las clases en el
+frame del gesto (`applyVisualState`) y marca la fila con `task--pending-write`;
+el siguiente render desde el store reconcilia o revierte.
 
 ### 8.3. `Store`
 
@@ -499,6 +719,12 @@ reconocedor de gestos en pleno arrastre y reiniciaría las transiciones CSS.
 
 Ningún componente usa `innerHTML`: los títulos de tarea son texto del usuario y
 se insertan siempre como `textContent` (`src/ui/dom.js`).
+
+`taskItem.js` y `touchTaskItem.js` están separados por eje de cambio: el
+primero decide **qué se muestra** (título, estado, hora de completado), el
+segundo **cómo se siente** (seguimiento del dedo, umbral, vibración,
+fricción). Mezclarlos obligaba a releer el render entero para ajustar un
+umbral.
 
 ---
 
@@ -535,12 +761,14 @@ al resto.
 | Frame durante el arrastre | Sin layout | Sólo `transform`; `will-change: transform` en la capa móvil |
 | Redibujado del heatmap | Una operación de canvas | 140 celdas en canvas en lugar de 140 nodos del DOM |
 | Escrituras por toque | 1 `put` en `daily_logs` | El log del día es un único registro |
+| Latencia percibida al marcar | 0 ms | UI optimista: el pintado no espera a IndexedDB (§ 8.2.1) |
+| Scroll de la rutina | ≤ 1 pantalla al abrir | Sólo el bloque de la hora actual arranca desplegado |
 
 ---
 
 ## 11. Matriz de pruebas
 
-`npm test` → **68 pruebas** con el runner nativo de Node, sin navegador ni
+`npm test` → **99 pruebas** con el runner nativo de Node, sin navegador ni
 dependencias.
 
 | Archivo | Cubre | Casos destacados |
@@ -548,9 +776,11 @@ dependencias.
 | `tests/dateUtils.test.js` | Claves de día locales | Medianoche en husos negativos, años bisiestos, fechas inexistentes, lunes = 0 |
 | `tests/taskValidator.test.js` | Contratos e invariantes | I1–I6, saneado de rachas corruptas, rechazo de claves no-UUID, preferencias con claves ajenas |
 | `tests/streakCalculator.test.js` | Algoritmo completo | Umbrales, tope de escudos a 28 días, reconciliación con y sin tareas activas, truncado a 400 días, convergencia del EWMA, proyección sin mutación |
+| `tests/gestures.test.js` | Máquina del swipe | Tap frente a arrastre, bloqueo de eje, confirmación por distancia y por velocidad, `pointercancel`, tramo lineal hasta el 50 %, monotonía y decrecimiento de la fricción, `overshoot`, limpieza de listeners |
+| `tests/deployPaths.test.js` | Rutas de despliegue | Ninguna ruta absoluta en HTML, CSS, imports, manifest ni precaché; resolución de `start_url`/`scope`/iconos bajo `/App-rutina-/`; registro del SW con alcance relativo |
 | `tests/events.test.js` | EventBus | Aislamiento de errores, baja durante la emisión, `once`, `onAny` |
-| `tests/repository.test.js` | Persistencia y servicio | Orden por bloque, soft-delete, export/import, import con registros corruptos, migración completa desde `APP_STATE_V1`, agrupación del store |
-| `tests/dayResetService.test.js` | Corte de medianoche | Cierre y extensión, rotura, escudo, ausencia de 4 días, idempotencia, reloj hacia atrás, recarga del historial |
+| `tests/repository.test.js` | Persistencia y servicio | Orden por bloque, soft-delete, export/import, import con registros corruptos, migración completa desde `APP_STATE_V1`, siembra de bienvenida y su idempotencia, plegado por defecto, UI optimista y su reversión ante fallo |
+| `tests/dayResetService.test.js` | Corte de medianoche | Cierre y extensión, rotura, escudo, ausencia de 4 días, idempotencia, congelación por reloj retrasado, deshielo y reevaluación, retroceso dentro del rango evaluado, recarga del historial |
 
 Comprobaciones estáticas en CI: `node --check` sobre todos los módulos, validez
 del manifest, coherencia del precaché y reproducibilidad de los iconos
@@ -563,21 +793,28 @@ Chromium mediante Playwright. No corre en CI porque Playwright no es
 dependencia del proyecto. Verifica nueve puntos que el runner de Node no
 alcanza:
 
+Sirve la aplicación **bajo un subdirectorio** (`/App-rutina-/`), igual que
+GitHub Pages, que es donde una ruta absoluta se rompería.
+
 | # | Verificación |
 |---|---|
-| 1 | Arranque real: motor `IndexedDB` y siembra de la rutina inicial |
-| 2 | Completar una tarea actualiza el anillo de progreso |
-| 3 | El swipe izquierdo dispensa la tarea |
-| 4 | Alta de tarea desde el botón flotante |
-| 5 | El heatmap pinta píxeles reales en el canvas |
-| 6 | Persistencia del estado tras recargar |
-| 7 | Service Worker con alcance raíz y 34 recursos precacheados |
-| 8 | Arranque completo **sin conexión** |
-| 9 | Volcado de copia de seguridad con esquema 2 |
+| 1 | Arranque real: motor `IndexedDB` y rutina de bienvenida de 4 tareas, una por bloque |
+| 2 | Ergonomía medida sobre el render: barra anclada al borde inferior, FAB de 56 × 56, cabecera con **cero** controles, ningún objetivo táctil por debajo de 48 px |
+| 3 | Bloques plegables: estado inicial, `aria-expanded`, plegado y desplegado por toque |
+| 4 | UI optimista: la clase se aplica antes de que resuelva la escritura, y el anillo avanza |
+| 5 | Swipe izquierdo: dispensa la tarea |
+| 6 | Hoja inferior: apertura, cierre por arrastre, cierre con Escape, `aria-modal` |
+| 7 | Alta de tarea desde la hoja, con control segmentado de bloque |
+| 8 | Hojas de histórico y ajustes; el heatmap pinta píxeles dentro de la hoja |
+| 9 | Persistencia del estado tras recargar |
+| 10 | Service Worker: alcance `/App-rutina-/`, script correcto y 37 recursos precacheados bajo esa ruta |
+| 11 | Manifest: `start_url`, `scope` e iconos resueltos dentro del subdirectorio |
+| 12 | Arranque completo **sin conexión** |
+| 13 | Volcado de copia de seguridad con esquema 2 |
 
 **Fuera de toda cobertura automática** (verificación manual en dispositivo):
-háptica, Screen Wake Lock, instalación de la PWA y comportamiento del gesto
-con un dedo real. Son capacidades que dependen del hardware y del permiso del
+háptica, Screen Wake Lock, instalación de la PWA, el teclado virtual bajo la
+hoja inferior y el comportamiento del gesto con un dedo real. Son capacidades que dependen del hardware y del permiso del
 usuario; el código las trata como opcionales y degrada si faltan.
 
 ---
@@ -596,3 +833,11 @@ usuario; el código las trata como opcionales y degrada si faltan.
 | Sin framework | React/Preact/Lit | El alcance no lo justifica: el coste de descarga y el acoplamiento superan lo que aportan |
 | Validación en frontera | Confianza en lo almacenado | Los datos vienen de backups editables a mano y de esquemas de versiones previas |
 | `sw.js` raíz + implementación en `public/` | SW sólo en `public/` | Un SW servido desde `public/` no controla `/index.html`, y Pages no permite ampliar el alcance por cabecera |
+| Acciones en barra inferior | Cabecera con botones, menú superior | En un móvil de 6,1"–6,7" con una mano, la franja superior exige recolocar el agarre |
+| Hoja inferior | Diálogo centrado (`<dialog>`) | Con el teclado virtual, un modal centrado queda partido y sus botones acaban detrás del teclado |
+| Fricción logarítmica | Resistencia lineal | La lineal sigue produciendo recorrido indefinidamente; la logarítmica comunica el límite sin tope duro |
+| UI optimista con reversión | Esperar a la transacción | 5–60 ms entre el dedo y el tachado se perciben como un toque perdido |
+| Bloques plegables | Lista completa siempre visible | Cuatro bloques son más de dos pantallas de scroll; a las 8:00 las tareas de la noche son ruido |
+| Congelar el día ante reloj atrasado | Reevaluar con la fecha nueva | Reevaluar reescribe logs cerrados y borra rachas legítimas por un viaje de husos |
+| Semilla de 4 hábitos | Empezar vacío; o semilla larga | Vacío obliga a configurar antes de entender; larga se percibe como deberes ajenos |
+| `scope` del SW derivado de `registration.scope` | Rutas relativas al worker | El mismo código sirve en `/`, en `/<repo>/` y en cualquier subruta, sin suposiciones |
