@@ -1,0 +1,210 @@
+/**
+ * layout.css — estructura, rejilla y adaptación móvil.
+ *
+ * Mobile-first: el layout base es una columna a ancho completo; a partir de
+ * 720 px la cabecera se fija y los paneles auxiliares pasan a dos columnas.
+ * Los `env(safe-area-inset-*)` evitan que la barra de gestos de iOS tape el
+ * botón flotante en la PWA instalada.
+ */
+
+#app {
+  min-height: 100dvh;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  max-width: 720px;
+  margin: 0 auto;
+  padding:
+    calc(var(--sp-4) + env(safe-area-inset-top))
+    calc(var(--sp-4) + env(safe-area-inset-right))
+    calc(var(--sp-6) + 72px + env(safe-area-inset-bottom))
+    calc(var(--sp-4) + env(safe-area-inset-left));
+}
+
+/* --- Cabecera -------------------------------------------------------- */
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.header__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.header__title {
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.header__date {
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+}
+
+.header__summary {
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+}
+
+.header__stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--c-border);
+}
+
+/* --- Contenido ------------------------------------------------------- */
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-1) var(--sp-2);
+}
+
+.section__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.app__panels {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.app__footer {
+  padding-top: var(--sp-2);
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+
+/* --- Diálogo --------------------------------------------------------- */
+
+.dialog {
+  width: min(460px, 100vw - 2rem);
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.dialog__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.dialog__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.field-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: var(--sp-3);
+}
+
+.dialog__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* --- Botón flotante y avisos ----------------------------------------- */
+
+.fab {
+  position: fixed;
+  right: calc(var(--sp-4) + env(safe-area-inset-right));
+  bottom: calc(var(--sp-4) + env(safe-area-inset-bottom));
+  z-index: 20;
+}
+
+.toaster {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sp-4) + 72px + env(safe-area-inset-bottom));
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: min(420px, calc(100vw - 2rem));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+}
+
+/* --- Puntos de ruptura ----------------------------------------------- */
+
+@media (min-width: 720px) {
+  .app {
+    gap: var(--sp-6);
+    padding-top: var(--sp-6);
+  }
+
+  .app__panels {
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+  }
+
+  .header__stats {
+    gap: var(--sp-4);
+  }
+}
+
+@media (min-width: 1024px) {
+  .app {
+    max-width: 880px;
+  }
+}
+
+/* En apaisado y pantallas bajas, la cabecera deja de ocupar media pantalla. */
+@media (max-height: 520px) and (orientation: landscape) {
+  .header__top {
+    align-items: flex-start;
+  }
+
+  .ring {
+    transform: scale(0.8);
+    transform-origin: top right;
+  }
+}

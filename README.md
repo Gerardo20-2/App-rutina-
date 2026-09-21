@@ -1,0 +1,322 @@
+# RoutineTracker
+
+PWA **offline-first** para el seguimiento de rutinas diarias. Sin backend, sin
+frameworks, sin dependencias en tiempo de ejecución: HTML5 semántico, CSS
+moderno y JavaScript con ES Modules nativos, servidos tal cual desde GitHub
+Pages.
+
+Todos los datos viven en el dispositivo (IndexedDB, con respaldo en
+`localStorage`). No hay peticiones de red más allá de la descarga inicial de la
+propia aplicación.
+
+---
+
+## Tabla de contenidos
+
+- [Características](#características)
+- [Arquitectura](#arquitectura)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Modelo de datos](#modelo-de-datos)
+- [Algoritmo de racha resiliente](#algoritmo-de-racha-resiliente)
+- [Interacción táctil](#interacción-táctil)
+- [Desarrollo local](#desarrollo-local)
+- [Pruebas](#pruebas)
+- [Despliegue](#despliegue)
+- [Compatibilidad y degradación](#compatibilidad-y-degradación)
+- [Privacidad](#privacidad)
+
+---
+
+## Características
+
+| Área | Detalle |
+|---|---|
+| Persistencia | IndexedDB `routine_tracker_db` v2 con tres *object stores* e índices; migración automática desde el `APP_STATE_V1` de la v1 |
+| Rachas | Algoritmo resiliente con umbrales parciales, **escudos** (hasta 3) y puntuación de consistencia por media móvil exponencial |
+| Corte de día | Detección de medianoche por comparación de clave de día, resistente a suspensión del dispositivo, pestañas en segundo plano y cambios de reloj |
+| Gestos | Swipe → completar, swipe ← dispensar, con bloqueo de eje, resistencia elástica y confirmación por velocidad |
+| Háptica | Patrones de vibración diferenciados por acción (Vibration API) |
+| Pantalla | Screen Wake Lock opcional con re-adquisición automática |
+| Visualización | Heatmap de 20 semanas dibujado en `<canvas>` con soporte de alta densidad y tema claro/oscuro |
+| PWA | Manifest instalable, iconos *maskable*, Service Worker con estrategias diferenciadas y aviso de actualización |
+| Datos | Exportación e importación del volcado completo en JSON |
+| Accesibilidad | Objetivos táctiles de 44 px, foco visible, `aria-live` en avisos, equivalentes textuales del heatmap, respeto por `prefers-reduced-motion` |
+
+## Arquitectura
+
+Cuatro capas con dependencias en **una sola dirección** (de arriba abajo):
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  UI            renderer.js · components/* · styles/*        │
+│                Sólo lee el store y despacha comandos.       │
+├─────────────────────────────────────────────────────────────┤
+│  Dominio       routineService · dayResetService             │
+│                streakCalculator · taskValidator · selectors │
+│                Funciones puras + servicios de aplicación.   │
+├─────────────────────────────────────────────────────────────┤
+│  Persistencia  repository → storageAdapter                  │
+│                indexedDbService | localStorageService       │
+├─────────────────────────────────────────────────────────────┤
+│  Núcleo        store (estado reactivo) · events (bus)       │
+│                constants · dateUtils                        │
+└─────────────────────────────────────────────────────────────┘
+        Plataforma: gestures · haptics · wakeLock (APIs nativas)
+```
+
+Reglas que sostienen el diseño:
+
+1. **La UI no toca el almacenamiento.** Todo cambio entra por `RoutineService`,
+   que valida, persiste, actualiza el store y sólo entonces emite el evento.
+   Si la escritura falla, la interfaz no llega a mostrar un estado que no está
+   guardado.
+2. **El dominio no conoce el DOM.** `streakCalculator`, `taskValidator`,
+   `dateUtils` y `selectors` son funciones puras: se ejecutan en Node y están
+   cubiertas por pruebas sin navegador ni *mocks*.
+3. **El motor de almacenamiento es intercambiable.** `repository` es lo único
+   que conoce nombres de stores; cambiar IndexedDB por otro backend es
+   implementar `StorageAdapter`.
+4. **El estado es uno.** `store` es la única verdad en memoria y notifica en
+   lotes agrupados por microtask: N mutaciones síncronas producen un render.
+
+## Estructura del repositorio
+
+```
+routine-tracker/
+├── .github/workflows/
+│   ├── ci.yml                     # Pruebas, sintaxis y verificación del precaché
+│   └── deploy.yml                 # Publicación en GitHub Pages
+├── public/
+│   ├── icons/                     # 192 · 512 · maskable 512 (generados)
+│   ├── favicon.ico
+│   ├── manifest.webmanifest
+│   └── sw.js                      # Service Worker (implementación)
+├── src/
+│   ├── core/
+│   │   ├── constants.js           # Configuración, enumeraciones y umbrales
+│   │   ├── dateUtils.js           # Claves de día en hora local
+│   │   ├── events.js              # EventBus pub/sub
+│   │   └── store.js               # Estado reactivo centralizado
+│   ├── domain/
+│   │   ├── dayResetService.js     # Corte de medianoche y reconciliación
+│   │   ├── routineService.js      # Servicio de aplicación (comandos)
+│   │   ├── selectors.js           # Derivaciones puras del estado
+│   │   ├── streakCalculator.js    # Rachas, escudos y consistencia
+│   │   └── taskValidator.js       # Contratos de datos y validación
+│   ├── storage/
+│   │   ├── indexedDbService.js    # Implementación primaria
+│   │   ├── localStorageService.js # Respaldo con serialización JSON
+│   │   ├── repository.js          # Fachada de dominio y migraciones
+│   │   └── storageAdapter.js      # Interfaz base
+│   ├── platform/
+│   │   ├── gestures.js            # Reconocedor de swipe (Pointer Events)
+│   │   ├── haptics.js             # Vibration API
+│   │   └── wakeLock.js            # Screen Wake Lock API
+│   ├── ui/
+│   │   ├── components/            # header · taskItem · taskList · heatmap
+│   │   │                          # taskEditor · settingsPanel · toast
+│   │   ├── styles/                # base.css · layout.css · components.css
+│   │   ├── dom.js                 # Constructores de nodos sin innerHTML
+│   │   └── renderer.js            # Montaje y suscripción al store
+│   └── main.js                    # Punto de entrada
+├── scripts/
+│   ├── generate-icons.mjs         # Generador de PNG/ICO sin dependencias
+│   └── check-precache.mjs         # Coherencia de la lista del Service Worker
+├── tests/                         # Suite con el runner nativo de Node
+│   └── e2e/smoke.mjs              # Prueba de humo opcional en Chromium
+├── docs/SPEC.md                   # Especificación técnica exhaustiva
+├── index.html                     # Shell de la aplicación
+├── sw.js                          # Registro raíz (importScripts de public/sw.js)
+└── package.json                   # Sólo scripts: no hay dependencias
+```
+
+> **Por qué hay un `sw.js` en la raíz.** El alcance de un Service Worker se
+> limita al directorio desde el que se sirve, y GitHub Pages no permite enviar
+> la cabecera `Service-Worker-Allowed` que lo ampliaría. El archivo raíz son
+> tres líneas (`importScripts('./public/sw.js')`) que dan alcance completo a la
+> aplicación manteniendo la implementación donde la sitúa la arquitectura.
+
+## Modelo de datos
+
+Base `routine_tracker_db`, versión **2**.
+
+| Store | Clave primaria | Índices |
+|---|---|---|
+| `tasks` | `id` (UUID v4) | `idx_section`, `idx_order`, `idx_archived` |
+| `daily_logs` | `date` (`YYYY-MM-DD`) | `idx_completion_rate` |
+| `system_metadata` | `key` | — |
+
+```javascript
+/**
+ * @typedef {Object} TaskDefinition
+ * @property {string} id               UUID v4.
+ * @property {string} title            Máx. 80 caracteres.
+ * @property {'morning'|'afternoon'|'evening'|'anytime'} section
+ * @property {number} order            Posición ordinal manual.
+ * @property {number} estimatedMinutes Duración estimada.
+ * @property {boolean} isArchived      Soft-delete.
+ * @property {string} createdAt        ISO 8601.
+ */
+
+/**
+ * @typedef {Object} DailyLog
+ * @property {string} date                         Clave primaria.
+ * @property {Object.<string, TaskExecutionRecord>} entries
+ * @property {number} totalActiveTasks
+ * @property {number} completedCount
+ * @property {number} completionRate               0.0 – 1.0
+ * @property {boolean} closed                      Procesado por el corte de medianoche.
+ */
+```
+
+`system_metadata` guarda tres claves obligatorias: `streak_state`,
+`user_preferences` y `schema_version`. El esquema completo, con invariantes y
+matriz de migración, está en [`docs/SPEC.md`](docs/SPEC.md).
+
+Dos decisiones que conviene conocer:
+
+- **`isArchived` se indexa como `archivedFlag` (0/1).** IndexedDB no indexa
+  booleanos; el repositorio mantiene el campo espejo y lo retira al leer.
+- **Los agregados se recalculan al validar.** `completedCount` y
+  `completionRate` nunca se leen del disco tal cual: se derivan de `entries`,
+  de modo que un backup manipulado o un log de una versión previa no pueden
+  inflar una racha.
+
+## Algoritmo de racha resiliente
+
+Para un día `d` con `n_d` tareas computables (activas menos dispensadas) y
+`c_d` completadas:
+
+```
+r_d = c_d / n_d                                     completionRate ∈ [0, 1]
+
+           VOID     si n_d = 0
+ω_d    =   SUCCESS  si r_d ≥ 0.8                    τ_success
+           PARTIAL  si 0.5 ≤ r_d < 0.8              τ_partial
+           FAIL     si r_d < 0.5
+```
+
+Transición de la racha `S` con escudos `E ∈ [0, 3]`:
+
+| ω_d | Racha | Escudos |
+|---|---|---|
+| `SUCCESS` | `S + 1` | `+1` cada 7 días consecutivos (tope 3) |
+| `PARTIAL` | `S` (gracia) | — |
+| `FAIL` con `E > 0` | `S` | `−1`, `shieldsUsedTotal + 1` |
+| `FAIL` con `E = 0` | `0` | — |
+| `VOID` | `S` | — |
+
+Consistencia ponderada (EWMA, ventana `W = 14`, `α = 2/(W+1)`):
+
+```
+C_d = α · 100·r_d + (1 − α) · C_{d−1}
+```
+
+El diseño responde a un problema real de las rachas clásicas: un único día malo
+borra meses de trabajo, y el usuario abandona. Aquí un día a medias conserva la
+racha sin premiarla, un día perdido consume un escudo que costó una semana
+ganar, y el EWMA mantiene una señal de tendencia que no depende de la racha
+para seguir siendo informativa.
+
+Los días en que la aplicación no se abrió se reconcilian al arrancar: se
+evalúan uno a uno en orden cronológico, tratando como `FAIL` los que tenían
+tareas activas y como `VOID` los que no.
+
+## Interacción táctil
+
+- **Bloqueo de eje.** Al superar el umbral, el gesto elige eje horizontal o
+  vertical y no lo reevalúa: un swipe diagonal dentro de una lista hace scroll,
+  no descarta la tarea.
+- **Confirmación por distancia o por velocidad.** Se confirma al 35 % del ancho
+  o con un *fling* de 0,45 px/ms, lo que ocurra antes.
+- **Resistencia elástica.** Pasado el punto de confirmación el elemento se
+  frena, comunicando de forma táctil que ya no hace falta arrastrar más.
+- **Sólo `transform`.** El arrastre no toca propiedades que disparen layout.
+
+## Desarrollo local
+
+Basta un servidor estático: no hay compilación ni instalación de dependencias.
+Los ES Modules exigen `http://`, no `file://`.
+
+```bash
+python3 -m http.server 8080       # o: npm run serve
+```
+
+Abre <http://localhost:8080>. El Service Worker sólo se registra en
+`localhost` o bajo HTTPS.
+
+Herramientas de depuración disponibles en la consola:
+
+```js
+__routineTracker.store.getState()          // estado completo
+__routineTracker.repository.exportBackup() // volcado JSON
+__routineTracker.dayReset.check('manual')  // forzar el corte de día
+```
+
+## Pruebas
+
+```bash
+npm test                          # o: node --test tests/*.test.js
+```
+
+68 pruebas sobre el runner nativo de Node, sin navegador ni dependencias:
+utilidades de fecha, validación de contratos, el algoritmo de racha completo
+(umbrales, escudos, reconciliación, truncado, EWMA), el bus de eventos, el
+repositorio con su migración desde la v1 y el corte de medianoche con reloj
+inyectado, incluidos los saltos de reloj hacia atrás.
+
+Comprobaciones adicionales en CI:
+
+```bash
+node scripts/check-precache.mjs   # el precaché del SW cubre todo src/
+node scripts/generate-icons.mjs   # regenera iconos (deben quedar idénticos)
+```
+
+Prueba de humo end-to-end **opcional** (no corre en CI porque necesita
+Playwright, que no es dependencia del proyecto):
+
+```bash
+npm install --no-save playwright && npx playwright install chromium
+npm run test:e2e
+```
+
+Levanta su propio servidor estático y verifica en Chromium lo que el runner de
+Node no alcanza: render real, gesto de swipe, IndexedDB del navegador, píxeles
+del heatmap, alcance del Service Worker, persistencia tras recargar y arranque
+**sin conexión**.
+
+## Despliegue
+
+1. **Settings → Pages → Source: “GitHub Actions”.**
+2. Cada `push` a `main` ejecuta `deploy.yml`: pruebas → verificación de iconos
+   → publicación del repositorio completo como artefacto de Pages.
+
+No hay paso de compilación porque no hace falta: el repositorio *es* la
+aplicación. Todas las rutas son relativas, así que funciona igual en la raíz de
+un dominio que bajo `usuario.github.io/repositorio/`.
+
+## Compatibilidad y degradación
+
+| Capacidad | Ausente ⇒ |
+|---|---|
+| IndexedDB | Respaldo automático a `localStorage`; si tampoco existe, memoria de sesión con aviso explícito |
+| Service Worker | La app funciona online con normalidad; no hay caché offline |
+| Vibration API | Interruptor deshabilitado, explicando el motivo |
+| Screen Wake Lock | Interruptor deshabilitado, explicando el motivo |
+| `dialog.showModal` | El editor degrada a panel con atributo `open` |
+| `ResizeObserver` | El heatmap se redibuja con el evento `resize` |
+| `CanvasRenderingContext2D.roundRect` | Trazado equivalente con `arcTo` |
+
+Objetivo: navegadores con soporte de ES Modules nativos (Chrome/Edge 63+,
+Firefox 60+, Safari 11+). La experiencia completa —instalación, gestos,
+háptica— está pensada para Chromium en Android y Safari en iOS.
+
+## Privacidad
+
+No hay servidor, cuentas, analítica ni peticiones a terceros. Los datos se
+quedan en el navegador y sólo salen del dispositivo si tú descargas el volcado
+JSON. Borrar los datos del sitio borra la aplicación por completo.
+
+---
+
+Licencia MIT.

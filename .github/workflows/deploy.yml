@@ -1,0 +1,75 @@
+# Despliegue de RoutineTracker en GitHub Pages.
+#
+# No hay paso de compilación: el repositorio ES la aplicación (ES Modules
+# nativos, CSS y HTML servidos tal cual). El artefacto se sube completo y el
+# único requisito es que las pruebas de dominio pasen antes de publicar.
+#
+# Requisito de configuración: Settings → Pages → Source = "GitHub Actions".
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Permisos mínimos para publicar en Pages con OIDC.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Un despliegue a la vez; no se cancelan los que ya están en curso.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Pruebas de dominio
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Ejecutar suite (sin dependencias)
+        run: node --test tests/*.test.js
+
+  build:
+    name: Preparar artefacto
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verificar que los iconos generados están al día
+        run: |
+          node scripts/generate-icons.mjs
+          if ! git diff --quiet -- public/icons public/favicon.ico; then
+            echo "::error::Los iconos versionados no coinciden con el generador. Ejecuta 'npm run icons' y haz commit."
+            exit 1
+          fi
+
+      - name: Evitar el procesado de Jekyll
+        run: touch .nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+  deploy:
+    name: Publicar
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Desplegar en GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

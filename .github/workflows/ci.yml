@@ -1,0 +1,41 @@
+# Integración continua: pruebas del núcleo de dominio y comprobaciones
+# estáticas que no requieren dependencias externas.
+
+name: CI
+
+on:
+  push:
+    branches-ignore: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Pruebas y comprobaciones
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Suite de pruebas
+        run: node --test tests/*.test.js
+
+      - name: Sintaxis de todos los módulos
+        run: |
+          status=0
+          while IFS= read -r file; do
+            node --check "$file" || status=1
+          done < <(find src public sw.js scripts -name '*.js' -o -name '*.mjs')
+          exit $status
+
+      - name: Validar JSON del manifest
+        run: node -e "JSON.parse(require('node:fs').readFileSync('public/manifest.webmanifest','utf8')); console.log('manifest OK')"
+
+      - name: Comprobar que el precaché del Service Worker existe
+        run: node scripts/check-precache.mjs

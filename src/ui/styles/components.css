@@ -1,0 +1,571 @@
+/**
+ * components.css — botones, tarjetas, ítems de tarea, heatmap y transiciones.
+ *
+ * El ítem de tarea usa dos capas: `.task__affordances` (fondo fijo con los
+ * iconos de acción) y `.task__surface` (capa que sigue al dedo). Sólo se anima
+ * `transform`, nunca `left`/`margin`, para que el gesto corra en el
+ * compositor y no dispare layout en cada frame.
+ */
+
+/* --- Botones --------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: var(--tap);
+  padding: 0 var(--sp-4);
+  background: var(--c-surface-alt);
+  color: var(--c-text);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  transition: background var(--duration) var(--ease), transform var(--duration) var(--ease);
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn--primary {
+  background: var(--c-accent);
+  color: var(--c-accent-contrast);
+  border-color: transparent;
+}
+
+.btn--danger {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+  border-color: transparent;
+}
+
+.fab {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  background: var(--c-accent);
+  color: var(--c-accent-contrast);
+  border: none;
+  border-radius: 50%;
+  box-shadow: var(--shadow-md);
+  font-size: 1.75rem;
+  line-height: 1;
+  transition: transform var(--duration) var(--ease);
+}
+
+.fab:active {
+  transform: scale(0.92);
+}
+
+/* --- Tarjetas -------------------------------------------------------- */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.card__title {
+  font-size: var(--fs-lg);
+  font-weight: 650;
+}
+
+.card__hint,
+.settings__engine {
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+}
+
+/* --- Anillo de progreso ---------------------------------------------- */
+
+.ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+
+.ring svg {
+  display: block;
+}
+
+.ring__track {
+  stroke: var(--c-surface-alt);
+}
+
+.ring__value {
+  stroke: var(--c-accent);
+  transition: stroke-dashoffset 420ms var(--ease);
+}
+
+.ring__label {
+  position: absolute;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.header[data-outcome="FAIL"] .ring__value {
+  stroke: var(--c-warning);
+}
+
+.header--at-risk .stat__value {
+  color: var(--c-warning);
+}
+
+/* --- Estadísticas ---------------------------------------------------- */
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.stat__label {
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat__body {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  margin: 0;
+}
+
+.stat__value,
+.stat__score {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat__unit {
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+}
+
+.stat__shields {
+  letter-spacing: 2px;
+}
+
+/* --- Secciones ------------------------------------------------------- */
+
+.section__title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
+  font-weight: 650;
+}
+
+.section__counter {
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.section[data-complete="true"] .section__counter {
+  color: var(--c-accent);
+  font-weight: 700;
+}
+
+/* --- Ítem de tarea --------------------------------------------------- */
+
+.task {
+  position: relative;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  /* Cede el eje vertical al scroll y reserva el horizontal para el gesto. */
+  touch-action: pan-y;
+}
+
+.task__affordances {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+
+.task__affordance {
+  opacity: calc(var(--swipe-progress, 0) * 1);
+}
+
+.task__affordance--complete {
+  color: var(--c-accent);
+}
+
+.task__affordance--skip {
+  color: var(--c-warning);
+}
+
+.task[data-swipe="complete"] .task__affordances {
+  background: var(--c-accent-soft);
+}
+
+.task[data-swipe="skip"] .task__affordances {
+  background: var(--c-danger-soft);
+}
+
+.task__surface {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: var(--tap);
+  padding: var(--sp-3);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  will-change: transform;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.task__surface.is-panning {
+  box-shadow: var(--shadow-md);
+}
+
+.task__check {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 2px solid var(--c-border);
+  border-radius: 50%;
+  transition: background var(--duration) var(--ease), border-color var(--duration) var(--ease);
+}
+
+.task__check-mark {
+  font-size: var(--fs-sm);
+  line-height: 1;
+  color: var(--c-accent-contrast);
+  transform: scale(0.4);
+  opacity: 0;
+  transition: transform var(--duration) var(--ease), opacity var(--duration) var(--ease);
+}
+
+.task--done .task__check {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+.task--done .task__check-mark {
+  transform: scale(1);
+  opacity: 1;
+}
+
+.task__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.task__title {
+  font-size: var(--fs-md);
+  overflow-wrap: anywhere;
+  transition: color var(--duration) var(--ease);
+}
+
+.task__meta {
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+}
+
+.task--done .task__title {
+  color: var(--c-text-soft);
+  text-decoration: line-through;
+  text-decoration-color: var(--c-accent);
+}
+
+.task--skipped .task__surface {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+.task--skipped .task__title {
+  text-decoration: line-through;
+  text-decoration-style: wavy;
+}
+
+.task__edit {
+  flex: none;
+  width: var(--tap);
+  height: var(--tap);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--c-text-faint);
+  font-size: var(--fs-lg);
+}
+
+/* --- Estado vacío ---------------------------------------------------- */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+  background: var(--c-surface);
+  border: 1px dashed var(--c-border);
+  border-radius: var(--radius-lg);
+}
+
+.empty__icon {
+  font-size: 2.5rem;
+}
+
+.empty__title {
+  font-size: var(--fs-lg);
+}
+
+.empty__text {
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  max-width: 34ch;
+}
+
+/* --- Heatmap --------------------------------------------------------- */
+
+.heatmap__canvas {
+  display: block;
+  max-width: 100%;
+  touch-action: manipulation;
+}
+
+.heatmap__legend {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+}
+
+.heatmap__swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
+.heatmap__swatch[data-level="0"] { background: var(--heat-0); }
+.heatmap__swatch[data-level="1"] { background: var(--heat-1); }
+.heatmap__swatch[data-level="2"] { background: var(--heat-2); }
+.heatmap__swatch[data-level="3"] { background: var(--heat-3); }
+.heatmap__swatch[data-level="4"] { background: var(--heat-4); }
+
+.heatmap__detail {
+  min-height: 1.25rem;
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+}
+
+/* --- Formularios y ajustes ------------------------------------------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.field__label {
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.field__input {
+  min-height: var(--tap);
+  padding: 0 var(--sp-3);
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  /* 16px evita el zoom automático de iOS al enfocar el campo. */
+  font-size: 16px;
+}
+
+.field__error:empty {
+  display: none;
+}
+
+.field__error {
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}
+
+.switch__label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: var(--tap);
+  cursor: pointer;
+}
+
+.switch__text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.switch__title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.switch__hint {
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+}
+
+.switch__input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch__track {
+  position: relative;
+  flex: none;
+  width: 46px;
+  height: 28px;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  transition: background var(--duration) var(--ease);
+}
+
+.switch__track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  background: var(--c-surface);
+  border-radius: 50%;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--duration) var(--ease);
+}
+
+.switch__input:checked + .switch__track {
+  background: var(--c-accent);
+  border-color: transparent;
+}
+
+.switch__input:checked + .switch__track::after {
+  transform: translateX(18px);
+}
+
+.switch__input:disabled + .switch__track {
+  opacity: 0.45;
+}
+
+.switch__input:focus-visible + .switch__track {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+.settings__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+/* --- Diálogo --------------------------------------------------------- */
+
+.dialog::backdrop {
+  background: rgb(9 14 20 / 55%);
+  backdrop-filter: blur(2px);
+}
+
+.dialog[open] {
+  animation: dialog-in 200ms var(--ease);
+}
+
+.dialog__title {
+  font-size: var(--fs-lg);
+}
+
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* --- Avisos ---------------------------------------------------------- */
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-left: 4px solid var(--c-text-faint);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  font-size: var(--fs-sm);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity var(--duration) var(--ease), transform var(--duration) var(--ease);
+}
+
+.toast.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+.toast--success { border-left-color: var(--c-accent); }
+.toast--error   { border-left-color: var(--c-danger); }
+
+.toast__text {
+  flex: 1;
+}
+
+.toast__action {
+  background: none;
+  border: none;
+  color: var(--c-accent);
+  font-weight: 700;
+}
+
+/* --- Error de arranque ----------------------------------------------- */
+
+.boot-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  max-width: 34ch;
+  margin: 20vh auto;
+  padding: var(--sp-5);
+  text-align: center;
+}
