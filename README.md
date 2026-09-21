@@ -14,6 +14,7 @@ propia aplicación.
 ## Tabla de contenidos
 
 - [Características](#características)
+- [Agenda por día de la semana](#agenda-por-día-de-la-semana)
 - [Ergonomía móvil: la zona del pulgar](#ergonomía-móvil-la-zona-del-pulgar)
 - [Arquitectura](#arquitectura)
 - [Estructura del repositorio](#estructura-del-repositorio)
@@ -33,6 +34,8 @@ propia aplicación.
 
 | Área | Detalle |
 |---|---|
+| Agenda | Bloques horarios **condicionales por día de la semana**: el martes hay turno de DiDi y clase, el viernes la ruta de la escuela, el fin de semana otra cosa |
+| Contexto | Bloque en curso resuelto en tiempo real, destacado y desplegado solo, sin recargar la página |
 | Ergonomía | Diseño para una sola mano: lectura arriba, **todas** las acciones en una barra inferior fija, hojas deslizantes en lugar de modales y objetivos táctiles de 48 px |
 | Persistencia | IndexedDB `routine_tracker_db` v2 con tres *object stores* e índices; migración automática desde el `APP_STATE_V1` de la v1 |
 | Rachas | Algoritmo resiliente con umbrales parciales, **escudos** (hasta 3) y puntuación de consistencia por media móvil exponencial |
@@ -44,9 +47,52 @@ propia aplicación.
 | Visualización | Heatmap de 20 semanas dibujado en `<canvas>` con soporte de alta densidad y tema claro/oscuro |
 | PWA | Manifest instalable, iconos *maskable*, Service Worker con estrategias diferenciadas y aviso de actualización |
 | Datos | Exportación e importación del volcado completo en JSON |
-| Primer arranque | Cuatro hábitos de ejemplo, uno por bloque: la app se usa antes de configurarla |
+| Primer arranque | Rutina real precargada (13 tareas repartidas por la semana): la app se usa antes de configurarla |
 | Robustez | Bloques plegables, aviso y congelación del cálculo diario si el reloj del dispositivo retrocede |
 | Accesibilidad | Objetivos táctiles de 44 px, foco visible, `aria-live` en avisos, equivalentes textuales del heatmap, respeto por `prefers-reduced-motion` |
+
+## Agenda por día de la semana
+
+La rutina no es «mañana / tarde / noche»: es la agenda real, y cambia según el
+día. Un bloque existe o no ese día, y puede tener horarios distintos según el
+día.
+
+| Día | Agenda |
+|---|---|
+| L, X, J | Arranque 04:30–08:30 · Jornada 09:00–14:00 · Comida 14:00–15:00 · Jornada 15:00–17:00 · Tiempo personal 17:00–23:00 · Desconexión 23:00–00:00 |
+| **Martes** | …igual hasta las 17:00 · **DiDi 17:00–18:00** · Traslado 18:00–19:00 · **Clase 19:00–20:30** · Tiempo personal **20:30**–23:00 · Desconexión |
+| **Viernes** | …igual hasta las 17:00 · **Traslado a la escuela 17:00–18:30** · **Clase 18:30–20:30** · Traslado a casa 20:30–21:30 · Cierre de semana 21:30–00:00 · Desconexión |
+| Sábado | Mañana **05:00**–12:00 · Tarde libre 12:00–19:00 · Noche 19:00–00:00 · Desconexión |
+| Domingo | Mañana **06:00**–12:00 · …igual que el sábado |
+
+Tres reglas sostienen el motor (`src/domain/timeBlockService.js`):
+
+1. **Un bloque se declara con reglas, no con un horario fijo.** Cada regla dice
+   en qué días aplica y con qué horario, así que «Tiempo personal» empieza a
+   las 17:00 los lunes y a las 20:30 los martes sin necesidad de duplicar el
+   bloque.
+2. **El bloque en curso es el más estrecho que contiene la hora.** Los rangos
+   pueden solaparse a propósito: el viernes a las 23:30, «Cierre de semana»
+   (21:30–00:00) y «Desconexión» (23:00–00:00) contienen el instante, y gana el
+   segundo por ser más específico. Sin esta regla habría que recortar rangos a
+   mano y declarar prioridades.
+3. **Una tarea aplica si su `daysOfWeek` lo permite _y_ su bloque existe ese
+   día.** La segunda condición evita el caso incoherente: una tarea marcada
+   «todos los días» dentro del bloque de clase del martes no puede aparecer un
+   jueves.
+
+Consecuencias en la aplicación:
+
+- **Filtrado estricto.** Lo que no aplica hoy no llega al DOM, y el servicio
+  rechaza marcarlo aunque el comando llegue desde la consola.
+- **Divisor honesto.** `completionRate` divide sólo entre las tareas
+  aplicables: un lunes sin clase no penaliza por no haber ido a clase. El
+  martes el divisor es 8; el sábado, 2.
+- **Auto-enfoque en vivo.** Al dar las 19:00 de un martes, «Clase» pasa a estar
+  en curso, se despliega sola y se destaca, sin recargar la página. El
+  vigilante programa un temporizador al siguiente borde de bloque en lugar de
+  sondear, con un tick de seguridad porque los temporizadores se congelan en
+  segundo plano.
 
 ## Ergonomía móvil: la zona del pulgar
 
@@ -147,11 +193,13 @@ routine-tracker/
 │   │   ├── routineService.js      # Servicio de aplicación (comandos)
 │   │   ├── selectors.js           # Derivaciones puras del estado
 │   │   ├── streakCalculator.js    # Rachas, escudos y consistencia
-│   │   └── taskValidator.js       # Contratos de datos y validación
+│   │   ├── taskValidator.js       # Contratos de datos y validación
+│   │   └── timeBlockService.js    # Agenda por día y bloque en curso
 │   ├── storage/
 │   │   ├── indexedDbService.js    # Implementación primaria
 │   │   ├── localStorageService.js # Respaldo con serialización JSON
 │   │   ├── repository.js          # Fachada de dominio y migraciones
+│   │   ├── seedData.js            # Rutina real precargada
 │   │   └── storageAdapter.js      # Interfaz base
 │   ├── platform/
 │   │   ├── gestures.js            # Reconocedor de swipe (Pointer Events)
@@ -185,23 +233,27 @@ routine-tracker/
 
 ## Modelo de datos
 
-Base `routine_tracker_db`, versión **2**.
+Base `routine_tracker_db`, versión **3**.
 
 | Store | Clave primaria | Índices |
 |---|---|---|
-| `tasks` | `id` (UUID v4) | `idx_section`, `idx_order`, `idx_archived` |
+| `tasks` | `id` (UUID v4 o slug estable) | `idx_section` → `sectionId`, `idx_order`, `idx_archived` |
 | `daily_logs` | `date` (`YYYY-MM-DD`) | `idx_completion_rate` |
 | `system_metadata` | `key` | — |
 
 ```javascript
 /**
  * @typedef {Object} TaskDefinition
- * @property {string} id               UUID v4.
+ * @property {string} id               UUID v4 o slug estable (`task-tue-class`).
  * @property {string} title            Máx. 80 caracteres.
- * @property {'morning'|'afternoon'|'evening'|'anytime'} section
- * @property {number} order            Posición ordinal manual.
- * @property {number} estimatedMinutes Duración estimada.
+ * @property {string} sectionId        Identificador del bloque horario.
+ * @property {number[]} daysOfWeek     Días activos (0 = domingo … 6 = sábado). Vacío = todos.
+ * @property {string} [timeStart]      Hora de referencia "HH:mm".
+ * @property {string} [timeEnd]        Hora de fin "HH:mm".
+ * @property {boolean} isAnchor        Bloque rígido (trabajo, clase, traslado).
+ * @property {number} order            Posición ordinal dentro del bloque.
  * @property {boolean} isArchived      Soft-delete.
+ * @property {number} estimatedMinutes Se deduce del rango horario si no se declara.
  * @property {string} createdAt        ISO 8601.
  */
 
@@ -220,7 +272,7 @@ Base `routine_tracker_db`, versión **2**.
 `user_preferences` y `schema_version`. El esquema completo, con invariantes y
 matriz de migración, está en [`docs/SPEC.md`](docs/SPEC.md).
 
-Dos decisiones que conviene conocer:
+Decisiones que conviene conocer:
 
 - **`isArchived` se indexa como `archivedFlag` (0/1).** IndexedDB no indexa
   booleanos; el repositorio mantiene el campo espejo y lo retira al leer.
@@ -228,6 +280,20 @@ Dos decisiones que conviene conocer:
   `completionRate` nunca se leen del disco tal cual: se derivan de `entries`,
   de modo que un backup manipulado o un log de una versión previa no pueden
   inflar una racha.
+- **Los identificadores de la semilla son legibles y estables.**
+  `task-tue-class` en lugar de un UUID: así re-sembrar no duplica nada y los
+  logs históricos siguen siendo interpretables al leerlos a mano.
+- **`isAnchor` se hereda del bloque** cuando no se declara, y
+  `estimatedMinutes` se deduce de `timeStart`/`timeEnd` cuando ambos están.
+
+### Migración desde la v2
+
+Los bloques genéricos de la v2 (`morning`, `afternoon`, `evening`, `anytime`)
+no tienen equivalente en la agenda real: nadie declaró a qué hora eran. Sus
+tareas se recogen en **«Cualquier momento»**, un bloque sin horario que existe
+todos los días, desde donde se pueden reasignar. El índice `idx_section` se
+borra y se recrea porque su `keyPath` cambió de `section` a `sectionId`, algo
+que IndexedDB sólo permite dentro de una transacción de upgrade.
 
 ## Algoritmo de racha resiliente
 
@@ -340,17 +406,18 @@ __routineTracker.dayReset.check('manual')  // forzar el corte de día
 npm test                          # o: node --test tests/*.test.js
 ```
 
-99 pruebas sobre el runner nativo de Node, sin navegador ni dependencias:
+132 pruebas sobre el runner nativo de Node, sin navegador ni dependencias:
 
 | Archivo | Cubre |
 |---|---|
-| `dateUtils.test.js` | Claves de día en hora local, bisiestos, husos |
-| `taskValidator.test.js` | Contratos e invariantes del modelo |
+| `dateUtils.test.js` | Claves de día en hora local, bisiestos, husos, parseo de `HH:mm` |
+| `timeBlockService.test.js` | Agenda de cada día, bloque en curso, solapamientos, filtrado por día, vigilante horario |
+| `taskValidator.test.js` | Contratos e invariantes del modelo, `daysOfWeek`, herencia de `isAnchor` |
 | `streakCalculator.test.js` | Umbrales, escudos, reconciliación, EWMA |
 | `gestures.test.js` | Máquina de estados del swipe, bloqueo de eje, fricción logarítmica |
 | `deployPaths.test.js` | Ninguna ruta absoluta; resolución del manifest y del precaché bajo subdirectorio |
-| `repository.test.js` | Persistencia, migración v1, siembra, bloques plegables, UI optimista y su reversión |
-| `dayResetService.test.js` | Corte de medianoche, ausencias, congelación por reloj desincronizado |
+| `repository.test.js` | Persistencia, migración v1, siembra real, divisor por día, UI optimista y su reversión |
+| `dayResetService.test.js` | Corte de medianoche, ausencias con divisor por agenda, reloj desincronizado |
 | `events.test.js` | Bus de eventos y aislamiento de errores |
 
 Comprobaciones adicionales en CI:
@@ -372,7 +439,11 @@ Levanta su propio servidor estático **bajo un subdirectorio**
 (`/App-rutina-/`, igual que GitHub Pages) y verifica en Chromium lo que el
 runner de Node no alcanza:
 
-- Rutina de bienvenida: cuatro tareas, una por bloque.
+- Semilla real: se renderizan exactamente las tareas que aplican hoy, ni una
+  de otro día, y los bloques vacíos no llegan al DOM.
+- Bloque en curso: como mucho uno destacado, desplegado y con su etiqueta.
+- Editor: el selector de días deshabilita los que el bloque no cubre (elegir
+  «Turno DiDi» deja sólo el martes).
 - Ergonomía medida sobre el render real: barra anclada al borde inferior, FAB
   de 56 × 56, cabecera sin controles y **ningún objetivo táctil por debajo de
   48 px**.

@@ -23,6 +23,10 @@ import { extname, join, normalize, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const { chromium } = await import('playwright');
+// La prueba comparte el motor de agenda con la aplicación: así las cifras
+// esperadas se derivan del mismo sitio y no hay que fijarlas a mano por día.
+const { tasksForDay, activeBlockId } = await import('../../src/domain/timeBlockService.js');
+const { INITIAL_TASKS } = await import('../../src/storage/seedData.js');
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const PORT = Number(process.env.PORT ?? 8123);
@@ -91,18 +95,53 @@ try {
   await page.goto(BASE, { waitUntil: 'networkidle' });
   await page.waitForSelector('.header__title', { timeout: 10_000 });
 
-  // ── 1. Arranque en frío: motor y rutina de bienvenida ──────────────────
+  // ── 1. Arranque en frío: motor, semilla real y filtrado por día ────────
   const engine = await page.textContent('.settings__engine');
   console.log('motor de persistencia:', engine);
   check(engine === 'IndexedDB', `se esperaba IndexedDB, hay "${engine}"`);
 
+  const hoy = new Date();
+  const aplicables = tasksForDay(INITIAL_TASKS, hoy);
+  const bloquesEsperados = new Set(aplicables.map((task) => task.sectionId));
+  console.log(`hoy (día ${hoy.getDay()}) aplican ${aplicables.length} de ${INITIAL_TASKS.length} tareas`);
+
   const seeded = await page.locator('.task').count();
   const seededSections = await page.locator('.section').count();
-  const seededTitles = await page.locator('.task__title').allTextContents();
-  console.log('tareas de bienvenida:', seeded, seededTitles);
-  check(seeded === 4, `se esperaban 4 tareas de bienvenida, hay ${seeded}`);
-  check(seededSections === 4, `se esperaba una tarea por bloque, hay ${seededSections} bloques`);
+  console.log('tareas renderizadas:', seeded, '· bloques:', seededSections);
+  check(seeded === aplicables.length,
+    `se esperaban ${aplicables.length} tareas del día, hay ${seeded}`);
+  check(seededSections === bloquesEsperados.size,
+    `se esperaban ${bloquesEsperados.size} bloques, hay ${seededSections}`);
   check(!(await page.locator('.empty').isVisible()), 'el estado vacío se muestra con tareas presentes');
+
+  // Filtrado estricto: nada de otros días llega al DOM.
+  const renderedIds = await page.locator('.task').evaluateAll(
+    (nodes) => nodes.map((node) => node.dataset.id),
+  );
+  const permitidos = new Set(aplicables.map((task) => task.id));
+  const intrusas = renderedIds.filter((id) => !permitidos.has(id));
+  check(intrusas.length === 0, `tareas de otros días en el DOM: ${intrusas.join(', ')}`);
+
+  const renderedBlocks = await page.locator('.section').evaluateAll(
+    (nodes) => nodes.map((node) => node.dataset.section),
+  );
+  const bloquesIntrusos = renderedBlocks.filter((id) => !bloquesEsperados.has(id));
+  check(bloquesIntrusos.length === 0, `bloques sin tareas en el DOM: ${bloquesIntrusos.join(', ')}`);
+
+  // ── 1 bis. Bloque en curso: auto-enfoque y destacado ───────────────────
+  const esperadoActivo = activeBlockId(hoy);
+  const marcados = await page.locator('.section[data-active="true"]').evaluateAll(
+    (nodes) => nodes.map((node) => node.dataset.section),
+  );
+  console.log('bloque en curso:', esperadoActivo ?? '(ninguno)', '· destacados:', marcados);
+  check(marcados.length <= 1, `más de un bloque marcado como en curso: ${marcados.join(', ')}`);
+  if (esperadoActivo && bloquesEsperados.has(esperadoActivo)) {
+    check(marcados[0] === esperadoActivo, `se esperaba destacar ${esperadoActivo}`);
+    check(await page.locator(`.section[data-section="${esperadoActivo}"]`).getAttribute('data-collapsed') === 'false',
+      'el bloque en curso debe arrancar desplegado');
+    check(await page.locator(`.section[data-section="${esperadoActivo}"] .section__badge`).isVisible(),
+      'falta la etiqueta «Bloque en curso»');
+  }
 
   // ── 2. Zona del pulgar: acciones abajo, cabecera pasiva ────────────────
   const ergonomics = await page.evaluate(() => {
@@ -213,17 +252,45 @@ try {
   await page.waitForTimeout(400);
   check(await sheet.isHidden(), 'la hoja no se cerró con Escape');
 
-  // ── 7. Alta de tarea desde la hoja ─────────────────────────────────────
+  // ── 7. Alta de tarea desde la hoja, con bloque y días ──────────────────
   await page.click('.fab');
   await page.waitForSelector('#sheet-editor.is-open');
   await page.fill('#task-title', 'Tarea de prueba E2E');
-  await page.click('label[for="section-afternoon"]');
-  await page.fill('#task-minutes', '12');
+  await page.selectOption('#task-block', 'anytime');
+  await page.fill('#task-start', '12:00');
   await page.click('#sheet-editor button[type=submit]');
   await page.waitForTimeout(400);
   const created = await page.locator('.task').count();
   check(created === seeded + 1, `la tarea nueva no apareció en la lista (${created} vs ${seeded + 1})`);
   check(await sheet.isHidden(), 'la hoja no se cerró tras guardar');
+
+  // Una tarea limitada a otro día de la semana no debe renderizarse.
+  const otroDia = (hoy.getDay() + 3) % 7;
+  await page.click('.fab');
+  await page.waitForSelector('#sheet-editor.is-open');
+  await page.fill('#task-title', 'Sólo otro día de la semana');
+  await page.selectOption('#task-block', 'anytime');
+  await page.click(`label[for="day-${otroDia}"]`);
+  await page.click('#sheet-editor button[type=submit]');
+  await page.waitForTimeout(400);
+  check(await page.locator('.task').count() === created,
+    'una tarea de otro día se está renderizando hoy');
+  check(await page.locator('.task__title', { hasText: 'Sólo otro día' }).count() === 0,
+    'la tarea de otro día aparece en el DOM');
+
+  // El selector de días no deja marcar un día en que el bloque no existe.
+  await page.click('.fab');
+  await page.waitForSelector('#sheet-editor.is-open');
+  await page.selectOption('#task-block', 'class_tuesday');
+  await page.waitForTimeout(120);
+  const habilitados = await page.locator('.daypicker__input:not([disabled])').evaluateAll(
+    (nodes) => nodes.map((node) => Number(node.value)),
+  );
+  console.log('días permitidos para «Clase» del martes:', habilitados);
+  check(habilitados.length === 1 && habilitados[0] === 2,
+    `el bloque de martes debería permitir sólo el día 2, permite ${habilitados.join(', ')}`);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
 
   // ── 8. Hojas de histórico y ajustes ────────────────────────────────────
   await page.click('.bar__btn >> nth=0');
@@ -250,6 +317,8 @@ try {
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForSelector('.section');
   check(await page.locator('.task').count() === created, 'las tareas no persistieron tras recargar');
+  check(await page.locator('.section[data-active="true"]').count() <= 1,
+    'tras recargar hay más de un bloque en curso');
   check(await page.locator('.task--done').count() >= 1, 'el estado completado no persistió');
 
   // ── 10. Service Worker: alcance relativo al subdirectorio ──────────────
@@ -305,7 +374,9 @@ try {
     return { schema: backup.schema, tasks: backup.data.tasks.length, logs: backup.data.daily_logs.length };
   });
   console.log('backup:', dump);
-  check(dump.schema === 2, 'el volcado no declara el esquema 2');
+  check(dump.schema === 3, 'el volcado no declara el esquema 3');
+  check(dump.tasks === INITIAL_TASKS.length + 2,
+    `el volcado debería tener ${INITIAL_TASKS.length + 2} tareas, tiene ${dump.tasks}`);
 
   if (process.env.SCREENSHOT_DIR) {
     await page.screenshot({ path: `${process.env.SCREENSHOT_DIR}/e2e-claro.png`, fullPage: true });

@@ -51,6 +51,7 @@ export function createHeader() {
   const shieldsSr = h('span', { class: 'sr-only' });
   const consistencyEl = h('span', { class: 'stat__score' });
 
+  const blockChip = h('p', { class: 'header__block', hidden: true });
   const warning = h('p', { class: 'header__warning', role: 'status', hidden: true });
 
   const el = h('header', { class: 'header', role: 'banner' }, [
@@ -76,6 +77,7 @@ export function createHeader() {
         h('dd', { class: 'stat__body' }, [consistencyEl]),
       ]),
     ]),
+    blockChip,
     warning,
   ]);
 
@@ -97,6 +99,16 @@ export function createHeader() {
     el.dataset.outcome = model.progress.outcome;
 
     summaryEl.textContent = buildSummary(model, completed, computable, skipped);
+
+    // Contexto temporal: qué bloque está en curso ahora mismo.
+    const block = model.activeBlock;
+    blockChip.hidden = block === null;
+    if (block) {
+      blockChip.textContent = block.isTimed
+        ? `${block.icon} ${block.label} · ${block.range}`
+        : `${block.icon} ${block.label}`;
+      blockChip.dataset.anchor = String(block.isAnchor);
+    }
 
     streakValue.textContent = String(model.streak.currentStreak);
     streakUnit.textContent = model.streak.currentStreak === 1 ? 'día' : 'días';

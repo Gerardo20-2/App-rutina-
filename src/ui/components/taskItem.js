@@ -69,7 +69,7 @@ export function createTaskItem(options) {
 
   const el = h('li', {
     class: 'task',
-    dataset: { id: task.id, section: task.section },
+    dataset: { id: task.id, section: task.sectionId, anchor: String(Boolean(task.isAnchor)) },
   }, [
     h('div', { class: 'task__affordances', 'aria-hidden': 'true' }, [
       h('span', { class: 'task__affordance task__affordance--complete' }, [
@@ -135,7 +135,8 @@ export function createTaskItem(options) {
       title.textContent = task.title;
       editBtn.setAttribute('aria-label', `Editar «${task.title}»`);
     }
-    el.dataset.section = task.section;
+    el.dataset.section = task.sectionId;
+    el.dataset.anchor = String(Boolean(task.isAnchor));
     el.classList.remove('task--pending-write');
     el.classList.toggle('task--done', Boolean(record.completed));
     el.classList.toggle('task--skipped', Boolean(record.skipped));
@@ -165,5 +166,11 @@ function buildMeta(task, record) {
       ? 'Completada'
       : `Completada · ${time.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}`;
   }
-  return task.estimatedMinutes > 0 ? `${task.estimatedMinutes} min` : 'Sin duración estimada';
+  // La hora de referencia manda sobre la duración: en una agenda, "17:00"
+  // informa más que "60 min".
+  const parts = [];
+  if (task.timeStart) parts.push(task.timeEnd ? `${task.timeStart} – ${task.timeEnd}` : task.timeStart);
+  else if (task.estimatedMinutes > 0) parts.push(`${task.estimatedMinutes} min`);
+  if (task.daysLabel && task.daysLabel !== 'Todos los días') parts.push(task.daysLabel);
+  return parts.join(' · ') || 'Sin horario';
 }

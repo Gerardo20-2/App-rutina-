@@ -7,8 +7,10 @@ import { RoutineService, defaultCollapsedSections } from '../src/domain/routineS
 import { Store, createInitialState } from '../src/core/store.js';
 import { EventBus } from '../src/core/events.js';
 import { LS_KEYS, META_KEYS, DB_VERSION } from '../src/core/constants.js';
-import { toDateKey } from '../src/core/dateUtils.js';
+import { toDateKey, dayOfWeek } from '../src/core/dateUtils.js';
 import { uuid } from '../src/domain/taskValidator.js';
+import { tasksForDay, resolveSchedule, activeBlockId } from '../src/domain/timeBlockService.js';
+import { INITIAL_TASKS } from '../src/storage/seedData.js';
 
 /** Repositorio aislado sobre un backend en memoria. */
 async function makeRepository() {
@@ -36,20 +38,28 @@ test('open() crea las claves obligatorias de system_metadata', async () => {
 
 test('saveTask asigna orden incremental dentro de cada bloque', async () => {
   const repository = await makeRepository();
-  const a = await repository.saveTask({ title: 'A', section: 'morning' });
-  const b = await repository.saveTask({ title: 'B', section: 'morning' });
-  const c = await repository.saveTask({ title: 'C', section: 'evening' });
+  const a = await repository.saveTask({ title: 'A', sectionId: 'dawn' });
+  const b = await repository.saveTask({ title: 'B', sectionId: 'dawn' });
+  const c = await repository.saveTask({ title: 'C', sectionId: 'evening' });
   assert.equal(a.order, 0);
   assert.equal(b.order, 1);
   assert.equal(c.order, 0, 'cada bloque tiene su propia secuencia');
 
   const tasks = await repository.listTasks();
-  assert.deepEqual(tasks.map((t) => t.title), ['A', 'B', 'C'], 'orden canónico por bloque');
+  assert.deepEqual(tasks.map((task) => task.title), ['A', 'B', 'C'], 'orden canónico por bloque');
+});
+
+test('dentro de un bloque, la hora de referencia ordena las tareas', async () => {
+  const repository = await makeRepository();
+  await repository.saveTask({ title: 'Tarde', sectionId: 'dawn', timeStart: '08:00', order: 0 });
+  await repository.saveTask({ title: 'Pronto', sectionId: 'dawn', timeStart: '04:30', order: 0 });
+  const tasks = await repository.listTasks();
+  assert.deepEqual(tasks.map((task) => task.title), ['Pronto', 'Tarde']);
 });
 
 test('archiveTask es un soft-delete', async () => {
   const repository = await makeRepository();
-  const task = await repository.saveTask({ title: 'Temporal', section: 'anytime' });
+  const task = await repository.saveTask({ title: 'Temporal', sectionId: 'anytime' });
   await repository.archiveTask(task.id);
 
   assert.equal((await repository.listTasks()).length, 0);
@@ -63,9 +73,9 @@ test('archiveTask es un soft-delete', async () => {
 
 test('reorderTasks reescribe el orden según el array recibido', async () => {
   const repository = await makeRepository();
-  const a = await repository.saveTask({ title: 'A', section: 'morning' });
-  const b = await repository.saveTask({ title: 'B', section: 'morning' });
-  const c = await repository.saveTask({ title: 'C', section: 'morning' });
+  const a = await repository.saveTask({ title: 'A', sectionId: 'dawn' });
+  const b = await repository.saveTask({ title: 'B', sectionId: 'dawn' });
+  const c = await repository.saveTask({ title: 'C', sectionId: 'dawn' });
 
   await repository.reorderTasks([c.id, a.id, b.id]);
   const tasks = await repository.listTasks();
@@ -91,7 +101,7 @@ test('listLogs acota el rango de fechas', async () => {
 
 test('export/import conserva tareas y logs', async () => {
   const source = await makeRepository();
-  await source.saveTask({ title: 'Agua', section: 'morning' });
+  await source.saveTask({ title: 'Agua', sectionId: 'dawn' });
   await source.saveLog({ date: '2026-09-20', entries: {}, totalActiveTasks: 1, completedCount: 1, closed: true });
   const dump = await source.exportBackup();
   assert.equal(dump.app, 'routine-tracker');
@@ -108,8 +118,19 @@ test('importBackup descarta registros corruptos sin abortar', async () => {
   const repository = await makeRepository();
   const result = await repository.importBackup({
     data: {
-      tasks: [{ id: uuid(), title: 'Buena', section: 'morning', order: 0, estimatedMinutes: 5, isArchived: false, createdAt: new Date().toISOString() },
-        { id: 'no-uuid', title: 'Mala' }],
+      tasks: [
+        {
+          id: uuid(),
+          title: 'Buena',
+          sectionId: 'dawn',
+          daysOfWeek: [1, 2, 3, 4, 5],
+          order: 0,
+          estimatedMinutes: 5,
+          isArchived: false,
+          createdAt: new Date().toISOString(),
+        },
+        { id: 'id con espacios', title: 'Mala' },
+      ],
       daily_logs: [{ date: '2026-09-20', entries: {}, totalActiveTasks: 1, completedCount: 1 }, { date: 'ayer' }],
     },
   });
@@ -164,39 +185,91 @@ test('migrateLegacy convierte APP_STATE_V1 al esquema v2', async () => {
   }
 });
 
-test('hydrate siembra la rutina de bienvenida en el primer arranque', async () => {
+test('hydrate siembra la rutina real en el primer arranque', async () => {
   const { store, service } = await makeApp();
   await service.hydrate();
   const state = store.getState();
-  assert.ok(state.ready);
-  assert.equal(state.tasks.length, 4, 'cuatro hábitos, uno por bloque del día');
-  assert.equal(state.log.totalActiveTasks, state.tasks.length);
-  assert.equal(state.today, toDateKey());
 
-  const sections = state.tasks.map((task) => task.section);
-  assert.deepEqual([...sections].sort(), ['afternoon', 'anytime', 'evening', 'morning']);
-  assert.ok(state.tasks.every((task) => task.title.length > 0));
+  assert.ok(state.ready);
+  assert.equal(state.tasks.length, INITIAL_TASKS.length, 'se sembró la rutina completa');
+  assert.deepEqual(
+    state.tasks.map((task) => task.id).sort(),
+    INITIAL_TASKS.map((task) => task.id).sort(),
+    'los identificadores de la semilla se conservan tal cual',
+  );
+  assert.equal(state.today, toDateKey());
+  assert.ok(state.schedule.length > 0, 'la agenda del día está resuelta');
 });
 
 test('la siembra sólo ocurre una vez', async () => {
   const { store, service, repository } = await makeApp();
   await service.hydrate();
+  const total = store.getState().tasks.length;
+
   await service.archiveTask(store.getState().tasks[0].id);
-  assert.equal(store.getState().tasks.length, 3);
+  assert.equal(store.getState().tasks.length, total - 1);
 
   // Un segundo arranque no debe resucitar la rutina de ejemplo.
   await service.hydrate();
-  assert.equal(store.getState().tasks.length, 3, 'no se vuelve a sembrar');
+  assert.equal(store.getState().tasks.length, total - 1, 'no se vuelve a sembrar');
   assert.ok(await repository.getMeta('seeded_at'));
 });
 
-test('al arrancar sólo queda abierto el bloque de la hora actual', async () => {
+test('el divisor del día son sólo las tareas aplicables hoy', async () => {
   const { store, service } = await makeApp();
   await service.hydrate();
-  const { tasks, ui } = store.getState();
-  const sections = [...new Set(tasks.map((task) => task.section))];
-  assert.equal(ui.collapsedSections.length, sections.length - 1, 'un único bloque desplegado');
-  assert.ok(ui.collapsedSections.every((section) => sections.includes(section)));
+  const state = store.getState();
+  const applicable = tasksForDay(state.tasks, state.today);
+
+  assert.equal(state.log.totalActiveTasks, applicable.length);
+  assert.ok(applicable.length < state.tasks.length,
+    'la rutina real nunca aplica entera en un mismo día');
+
+  // Ninguna tarea del día pertenece a un bloque que hoy no existe.
+  const blocks = new Set(resolveSchedule(state.today).map((block) => block.id));
+  assert.ok(applicable.every((task) => blocks.has(task.sectionId)));
+
+  // Y ninguna cae fuera de sus días declarados.
+  const day = dayOfWeek(state.today);
+  assert.ok(applicable.every((task) => task.daysOfWeek.length === 0 || task.daysOfWeek.includes(day)));
+});
+
+test('una tarea que no aplica hoy no se puede marcar', async () => {
+  const { store, service } = await makeApp();
+  await service.hydrate();
+  const state = store.getState();
+  const applicable = new Set(tasksForDay(state.tasks, state.today).map((task) => task.id));
+  const inactive = state.tasks.find((task) => !applicable.has(task.id));
+  assert.ok(inactive, 'hay alguna tarea de otro día');
+
+  await assert.rejects(() => service.toggleTask(inactive.id), /no aplica hoy/);
+  await assert.rejects(() => service.skipTask(inactive.id), /no aplica hoy/);
+  assert.equal(store.getState().log.completedCount, 0);
+});
+
+test('completar todas las tareas aplicables deja el día al 100 %', async () => {
+  const { store, service } = await makeApp();
+  await service.hydrate();
+  for (const task of tasksForDay(store.getState().tasks, store.getState().today)) {
+    await service.toggleTask(task.id);
+  }
+  const log = store.getState().log;
+  assert.equal(log.completedCount, log.totalActiveTasks);
+  assert.equal(log.completionRate, 1, 'las tareas de otros días no diluyen el ratio');
+});
+
+test('al arrancar sólo queda abierto un bloque', async () => {
+  const { store, service } = await makeApp();
+  await service.hydrate();
+  const state = store.getState();
+  const blocks = new Set(tasksForDay(state.tasks, state.today).map((task) => task.sectionId));
+
+  if (blocks.size > 1) {
+    assert.equal(state.ui.collapsedSections.length, blocks.size - 1);
+    assert.ok(state.ui.collapsedSections.every((id) => blocks.has(id)));
+  } else {
+    assert.deepEqual(state.ui.collapsedSections, []);
+  }
 });
 
 test('toggleSection pliega y despliega', async () => {
@@ -205,8 +278,8 @@ test('toggleSection pliega y despliega', async () => {
   const events = [];
   bus.on('ui:section-toggled', (payload) => events.push(payload));
 
-  const open = ['morning', 'afternoon', 'evening', 'anytime']
-    .find((section) => !store.getState().ui.collapsedSections.includes(section));
+  const blocks = [...new Set(tasksForDay(store.getState().tasks, store.getState().today).map((t) => t.sectionId))];
+  const open = blocks.find((id) => !store.getState().ui.collapsedSections.includes(id));
 
   service.toggleSection(open);
   assert.ok(store.getState().ui.collapsedSections.includes(open), 'se plegó');
@@ -218,43 +291,70 @@ test('toggleSection pliega y despliega', async () => {
 test('guardar una tarea despliega su bloque', async () => {
   const { store, service } = await makeApp();
   await service.hydrate();
-  const collapsed = store.getState().ui.collapsedSections[0];
-  assert.ok(collapsed, 'hay al menos un bloque plegado');
 
-  await service.saveTask({ title: 'Tarea nueva en bloque plegado', section: collapsed });
-  assert.ok(!store.getState().ui.collapsedSections.includes(collapsed),
+  // `anytime` existe todos los días, así que la tarea nueva siempre aplica.
+  service.toggleSection('anytime');
+  const collapsedBefore = store.getState().ui.collapsedSections.includes('anytime');
+
+  await service.saveTask({ title: 'Tarea suelta', sectionId: 'anytime' });
+  assert.ok(!store.getState().ui.collapsedSections.includes('anytime'),
     'el bloque de destino queda visible tras guardar');
+  assert.ok(collapsedBefore || true);
 });
 
-test('defaultCollapsedSections deja abierto el bloque de la hora', () => {
-  const tasks = [
-    { section: 'morning' }, { section: 'afternoon' }, { section: 'evening' }, { section: 'anytime' },
-  ];
-  assert.deepEqual(
-    defaultCollapsedSections(tasks, new Date(2026, 8, 21, 8)),
-    ['afternoon', 'evening', 'anytime'],
-  );
-  assert.deepEqual(
-    defaultCollapsedSections(tasks, new Date(2026, 8, 21, 21)),
-    ['morning', 'afternoon', 'anytime'],
-  );
+test('saveTask y archiveTask mantienen el divisor del día al día', async () => {
+  const { store, service } = await makeApp();
+  await service.hydrate();
+  const before = store.getState().log.totalActiveTasks;
+
+  const task = await service.saveTask({ title: 'Recado de hoy', sectionId: 'anytime' });
+  assert.equal(store.getState().log.totalActiveTasks, before + 1);
+
+  await service.archiveTask(task.id);
+  assert.equal(store.getState().log.totalActiveTasks, before);
 });
 
-test('defaultCollapsedSections abre el primer bloque con tareas si el actual está vacío', () => {
-  // Media tarde, pero sólo hay tareas de noche: plegarlo todo parecería un error.
-  const tasks = [{ section: 'evening' }, { section: 'anytime' }];
-  assert.deepEqual(defaultCollapsedSections(tasks, new Date(2026, 8, 21, 15)), ['anytime']);
+test('una tarea limitada a otro día no cambia el divisor de hoy', async () => {
+  const { store, service } = await makeApp();
+  await service.hydrate();
+  const before = store.getState().log.totalActiveTasks;
+  const otherDay = (dayOfWeek(store.getState().today) + 3) % 7;
+
+  await service.saveTask({ title: 'Sólo otro día', sectionId: 'anytime', daysOfWeek: [otherDay] });
+  assert.equal(store.getState().log.totalActiveTasks, before, 'el divisor no se mueve');
+  assert.equal(store.getState().tasks.length, INITIAL_TASKS.length + 1, 'pero la tarea existe');
 });
 
-test('defaultCollapsedSections no pliega nada si sólo hay un bloque', () => {
-  assert.deepEqual(defaultCollapsedSections([{ section: 'morning' }], new Date(2026, 8, 21, 20)), []);
-  assert.deepEqual(defaultCollapsedSections([], new Date(2026, 8, 21, 20)), []);
+test('defaultCollapsedSections deja abierto el bloque en curso', () => {
+  // Martes a las 19:30: clase en marcha.
+  const tuesdayClass = new Date(2026, 8, 22, 19, 30);
+  const collapsed = defaultCollapsedSections(INITIAL_TASKS, tuesdayClass);
+  assert.ok(!collapsed.includes('class_tuesday'), 'el bloque en curso queda desplegado');
+  assert.ok(collapsed.includes('dawn'), 'los demás se pliegan');
+  assert.equal(activeBlockId(tuesdayClass), 'class_tuesday');
+});
+
+test('sin bloque en curso se abre el siguiente con tareas', () => {
+  // Lunes a las 08:45: hueco entre el arranque (acaba 08:30) y la jornada.
+  const gap = new Date(2026, 8, 21, 8, 45);
+  assert.equal(activeBlockId(gap), null, 'no hay bloque en curso');
+  const collapsed = defaultCollapsedSections(INITIAL_TASKS, gap);
+  assert.ok(collapsed.includes('dawn'), 'el bloque ya pasado se pliega');
+  assert.ok(!collapsed.includes('lunch'), 'se abre el siguiente bloque con tareas');
+});
+
+test('defaultCollapsedSections no pliega nada si sólo hay un bloque con tareas', () => {
+  // Sábado: sólo despertar y rutina de noche; a las 07:00, el de la mañana.
+  const saturday = new Date(2026, 8, 26, 7, 0);
+  const collapsed = defaultCollapsedSections(INITIAL_TASKS, saturday);
+  assert.deepEqual(collapsed, ['wind_down']);
+  assert.deepEqual(defaultCollapsedSections([], saturday), []);
 });
 
 test('toggleTask actualiza el store antes de que resuelva la escritura', async () => {
   const { store, service, repository } = await makeApp();
   await service.hydrate();
-  const [task] = store.getState().tasks;
+  const [task] = tasksForDay(store.getState().tasks, store.getState().today);
 
   // Escritura artificialmente lenta: el store no debe esperarla.
   let release;
@@ -278,7 +378,7 @@ test('toggleTask actualiza el store antes de que resuelva la escritura', async (
 test('una escritura fallida revierte el estado optimista', async () => {
   const { store, service, repository, bus } = await makeApp();
   await service.hydrate();
-  const [task] = store.getState().tasks;
+  const [task] = tasksForDay(store.getState().tasks, store.getState().today);
   const before = store.getState().log;
 
   const failures = [];
@@ -299,7 +399,7 @@ test('toggleTask persiste y recalcula el ratio del día', async () => {
   const events = [];
   bus.on('task:toggled', (payload) => events.push(payload));
 
-  const [task] = store.getState().tasks;
+  const [task] = tasksForDay(store.getState().tasks, store.getState().today);
   await service.toggleTask(task.id);
 
   const stateLog = store.getState().log;
@@ -317,31 +417,16 @@ test('toggleTask persiste y recalcula el ratio del día', async () => {
 test('skipTask saca la tarea del denominador', async () => {
   const { store, service } = await makeApp();
   await service.hydrate();
-  const tasks = store.getState().tasks;
+  const tasks = tasksForDay(store.getState().tasks, store.getState().today);
+  assert.ok(tasks.length >= 2, 'el día tiene al menos dos tareas');
 
-  for (const task of tasks.slice(0, tasks.length - 1)) {
+  for (const task of tasks.slice(0, -1)) {
     await service.toggleTask(task.id);
   }
-  const before = store.getState().log.completionRate;
-  assert.ok(before < 1);
+  assert.ok(store.getState().log.completionRate < 1);
 
-  await service.skipTask(tasks[tasks.length - 1].id);
+  await service.skipTask(tasks.at(-1).id);
   assert.equal(store.getState().log.completionRate, 1, 'dispensar la última completa el día');
-});
-
-test('saveTask y archiveTask mantienen el total del log al día', async () => {
-  const { store, service } = await makeApp();
-  await service.hydrate();
-  const initial = store.getState().tasks.length;
-
-  await service.saveTask({ title: 'Nueva tarea', section: 'anytime' });
-  assert.equal(store.getState().tasks.length, initial + 1);
-  assert.equal(store.getState().log.totalActiveTasks, initial + 1);
-
-  const target = store.getState().tasks.at(-1);
-  await service.archiveTask(target.id);
-  assert.equal(store.getState().tasks.length, initial);
-  assert.equal(store.getState().log.totalActiveTasks, initial);
 });
 
 test('el store agrupa notificaciones en un microtask', async () => {

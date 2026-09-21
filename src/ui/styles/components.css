@@ -272,6 +272,26 @@
   letter-spacing: 2px;
 }
 
+.header__block {
+  align-self: flex-start;
+  padding: var(--sp-1) var(--sp-3);
+  background: var(--c-accent-soft);
+  border-radius: 999px;
+  color: var(--c-accent);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.header__block[data-anchor="true"] {
+  background: var(--c-surface-alt);
+  color: var(--c-text-soft);
+}
+
+/* Una tarea de bloque rígido lleva marca lateral: no se decide, se cumple. */
+.task[data-anchor="true"] .task__surface {
+  border-left: 3px solid color-mix(in srgb, var(--c-text-soft) 45%, transparent);
+}
+
 /* --- Bloques plegables ------------------------------------------------- */
 
 .section {
@@ -316,6 +336,55 @@
 .section__range {
   color: var(--c-text-faint);
   font-size: var(--fs-xs);
+}
+
+.section__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.section__anchor {
+  margin-left: var(--sp-1);
+  font-size: 0.75em;
+}
+
+/* Bloque en curso: barra lateral, fondo tenue y un punto que late. Es el
+   único elemento de la lista que se destaca, para que el ojo aterrice ahí al
+   abrir la aplicación. */
+.section[data-active="true"] {
+  position: relative;
+  padding-left: var(--sp-2);
+  background: color-mix(in srgb, var(--c-accent) 7%, transparent);
+  border-radius: var(--radius-md);
+  box-shadow: inset 3px 0 0 var(--c-accent);
+}
+
+.section__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-2);
+  background: var(--c-accent-soft);
+  border-radius: 999px;
+  color: var(--c-accent);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.section__pulse {
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  border-radius: 50%;
+  animation: pulse 2s var(--ease) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
 }
 
 .section__counter {
@@ -680,58 +749,55 @@
   font-size: var(--fs-xs);
 }
 
-/* Control segmentado de bloques del día. */
-.segmented {
+/* Selector de días de la semana: siete casillas de 48 px. */
+.daypicker {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   gap: var(--sp-1);
-  padding: var(--sp-1);
-  background: var(--c-surface-alt);
-  border-radius: var(--radius-md);
 }
 
-.segmented__option {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
+.daypicker__option {
+  display: grid;
+  place-items: center;
   min-height: var(--tap);
-  padding: var(--sp-1);
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
   border-radius: var(--radius-sm);
   color: var(--c-text-soft);
-  text-align: center;
-  transition: background var(--duration) var(--ease), color var(--duration) var(--ease);
+  font-size: var(--fs-sm);
+  font-weight: 700;
   cursor: pointer;
+  transition: background var(--duration) var(--ease), color var(--duration) var(--ease);
 }
 
-.segmented__input {
+.daypicker__input {
   position: absolute;
   opacity: 0;
   pointer-events: none;
 }
 
-.segmented__icon {
-  font-size: 1rem;
-  line-height: 1;
+.daypicker__option:has(.daypicker__input:checked) {
+  background: var(--c-accent);
+  border-color: transparent;
+  color: var(--c-accent-contrast);
 }
 
-.segmented__text {
-  font-size: 0.6875rem;
-  font-weight: 600;
-  line-height: 1.15;
+/* Un día que el bloque no cubre no se puede elegir: marcarlo crearía una
+   tarea que nunca llegaría a mostrarse. */
+.daypicker__option.is-disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
-.segmented__input:checked + .segmented__icon,
-.segmented__option:has(.segmented__input:checked) {
-  background: var(--c-surface);
-  color: var(--c-text);
-  box-shadow: var(--shadow-sm);
-}
-
-.segmented__option:has(.segmented__input:focus-visible) {
+.daypicker__option:has(.daypicker__input:focus-visible) {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
+}
+
+.field__hint {
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
 }
 
 .settings {

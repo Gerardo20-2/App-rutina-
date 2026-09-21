@@ -110,15 +110,71 @@ export function msUntilNextMidnight(now = new Date()) {
 }
 
 /**
- * Bloque del día sugerido según la hora local.
+ * Minutos transcurridos desde la medianoche local.
  * @param {Date} [now]
- * @returns {'morning'|'afternoon'|'evening'}
+ * @returns {number} 0 … 1439
  */
-export function currentSection(now = new Date()) {
-  const h = now.getHours();
-  if (h < 12) return 'morning';
-  if (h < 19) return 'afternoon';
-  return 'evening';
+export function minutesOfDay(now = new Date()) {
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+/**
+ * Convierte "HH:mm" en minutos desde medianoche.
+ * @param {string} time
+ * @returns {number} 0 … 1440 ("24:00" y "00:00" como fin valen 1440 vía {@link normalizeRange}).
+ * @throws {TypeError} si el formato no es "HH:mm".
+ */
+export function parseTime(time) {
+  if (typeof time !== 'string' || !/^([01]\d|2[0-4]):[0-5]\d$/.test(time)) {
+    throw new TypeError(`Hora inválida: ${JSON.stringify(time)} (se esperaba HH:mm)`);
+  }
+  const [hours, minutes] = time.split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
+/** @param {string} time @returns {boolean} */
+export function isTime(time) {
+  try {
+    parseTime(time);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Minutos desde medianoche a "HH:mm" (1440 se muestra como "24:00").
+ * @param {number} minutes
+ * @returns {string}
+ */
+export function formatMinutes(minutes) {
+  const total = Math.max(0, Math.min(1440, Math.round(minutes)));
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/**
+ * Normaliza un rango horario a minutos, tratando el fin "00:00" como el final
+ * del día (1440) en lugar de como el principio: un bloque de 23:00 a 00:00
+ * dura una hora, no menos veintitrés.
+ * @param {string} start
+ * @param {string} end
+ * @returns {{start: number, end: number}}
+ */
+export function normalizeRange(start, end) {
+  const from = parseTime(start);
+  let to = parseTime(end);
+  if (to <= from) to += 1440;
+  return { start: from, end: Math.min(to, 1440 + from) };
+}
+
+/**
+ * Día de la semana en la numeración de `Date.prototype.getDay()`.
+ * @param {string|Date} value clave `YYYY-MM-DD` o fecha.
+ * @returns {number} 0 = domingo … 6 = sábado.
+ */
+export function dayOfWeek(value = new Date()) {
+  const date = typeof value === 'string' ? fromDateKey(value) : value;
+  return date.getDay();
 }
 
 /**
@@ -141,7 +197,8 @@ export function formatLongDate(key, locale = 'es-ES') {
 }
 
 /**
- * Índice de día de la semana con lunes como 0 (calendarios europeos).
+ * Índice de día de la semana con lunes como 0, para la rejilla del heatmap
+ * (no confundir con {@link dayOfWeek}, que usa la numeración de `getDay()`).
  * @param {string} key
  * @returns {number} 0 = lunes … 6 = domingo.
  */

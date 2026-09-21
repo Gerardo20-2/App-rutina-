@@ -25,7 +25,7 @@ import { createBottomSheet } from './components/bottomSheet.js';
 import { createBottomBar } from './components/bottomBar.js';
 import { createToaster } from './components/toast.js';
 import { EVENTS, STREAK_TRANSITION } from '../core/constants.js';
-import { currentSection } from '../core/dateUtils.js';
+import { TimeBlockWatcher, FALLBACK_BLOCK_ID } from '../domain/timeBlockService.js';
 
 /**
  * @param {{
@@ -59,9 +59,9 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
     onSkip: (id) => void run(() => service.skipTask(id)),
     onEdit: (id) => {
       const task = store.getState().tasks.find((candidate) => candidate.id === id);
-      if (task) editor.open(task, task.section);
+      if (task) editor.open(task, task.sectionId);
     },
-    onCreate: () => editor.open(null, currentSection()),
+    onCreate: () => editor.open(null, defaultBlock()),
     onToggleSection: (section) => service.toggleSection(section),
   });
 
@@ -91,7 +91,7 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
 
   const bottomBar = createBottomBar({
     haptics,
-    onCreate: (trigger) => editor.open(null, currentSection(), trigger),
+    onCreate: (trigger) => editor.open(null, defaultBlock(), trigger),
     onHistory: (trigger) => {
       historySheet.open(trigger);
       // El canvas se dimensiona contra su contenedor: dentro de una hoja aún
@@ -112,6 +112,27 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
   const components = [header, taskList, heatmap, settings, bottomBar];
   let frame = null;
 
+  /**
+   * Vigila el paso de un bloque horario al siguiente y refresca la agenda sin
+   * recargar la página: al dar las 19:00 de un martes, «Clase» pasa a estar en
+   * curso y se despliega sola.
+   */
+  let firstBlockResolution = true;
+  const blockWatcher = new TimeBlockWatcher({
+    onChange: ({ blockId }) => {
+      service.refreshTimeContext();
+      // La primera resolución no es una transición: es el estado con el que
+      // arranca la aplicación, y vibrar al abrirla sería ruido.
+      if (!firstBlockResolution && blockId !== null) haptics.fire('TAP');
+      firstBlockResolution = false;
+    },
+  });
+
+  /** Bloque sugerido al crear una tarea: el que está en curso. */
+  function defaultBlock() {
+    return store.getState().ui.activeBlockId ?? FALLBACK_BLOCK_ID;
+  }
+
   function mount() {
     root.replaceChildren(app, bottomBar.el, editor.el, historySheet.el, settingsSheet.el, toaster.el);
     applyPreferences(store.getState().preferences);
@@ -121,9 +142,11 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
     // desde el menú contextual del icono, y limpia la URL para que un
     // refresco no lo reabra.
     if (new URLSearchParams(location.search).get('action') === 'new-task') {
-      editor.open(null, currentSection());
+      editor.open(null, defaultBlock());
       history.replaceState(null, '', location.pathname);
     }
+
+    blockWatcher.start();
 
     // Una sola suscripción: la identidad del estado cambia con cada mutación,
     // así que el selector identidad basta y evita N suscripciones activas.
@@ -165,6 +188,7 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
     });
 
     return () => {
+      blockWatcher.stop();
       unsubscribe();
       offDayRolled();
       offToggled();

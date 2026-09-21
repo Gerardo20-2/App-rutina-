@@ -5,7 +5,7 @@
 > matriz de pruebas. Describe **el código que existe en este repositorio**; cada
 > sección enlaza con el módulo que la implementa.
 
-**Versión de esquema:** 2 · **Dependencias externas:** ninguna ·
+**Versión de esquema:** 3 · **Dependencias externas:** ninguna ·
 **Objetivo de ejecución:** navegadores con ES Modules nativos
 
 ---
@@ -15,6 +15,7 @@
 1. [Contratos de datos y tipado estricto](#1-contratos-de-datos-y-tipado-estricto)
 2. [Esquema de persistencia](#2-esquema-de-persistencia)
 3. [Migraciones](#3-migraciones)
+3 bis. [Motor de bloques horarios](#3-bis-motor-de-bloques-horarios)
 4. [Algoritmo de racha resiliente](#4-algoritmo-de-racha-resiliente)
 5. [Máquina de estados del corte de día](#5-máquina-de-estados-del-corte-de-día)
 6. [Máquina de estados del reconocedor de gestos](#6-máquina-de-estados-del-reconocedor-de-gestos)
@@ -42,25 +43,41 @@ migración de la v1) y todo dato que sale hacia la persistencia atraviesa
 ```javascript
 /**
  * @typedef {Object} TaskDefinition
- * @property {string} id               Identificador único UUID v4.
+ * @property {string} id               Identificador único: UUID v4 o slug estable.
  * @property {string} title            Nombre legible de la tarea (máx 80 caracteres).
- * @property {'morning'|'afternoon'|'evening'|'anytime'} section Bloque del día.
- * @property {number} order            Posición ordinal para ordenamiento manual.
- * @property {number} estimatedMinutes Duración estimada de la tarea.
+ * @property {string} sectionId        Identificador del bloque horario.
+ * @property {number[]} daysOfWeek     Días activos (0 = domingo … 6 = sábado). Vacío = todos.
+ * @property {string} [timeStart]      Hora de referencia "HH:mm".
+ * @property {string} [timeEnd]        Hora de fin "HH:mm".
+ * @property {boolean} isAnchor        Bloque rígido (trabajo, clase, traslado).
+ * @property {number} order            Posición ordinal dentro del bloque.
  * @property {boolean} isArchived      Flag para soft-delete.
+ * @property {number} estimatedMinutes Duración estimada; derivada del rango si falta.
  * @property {string} createdAt        Timestamp ISO 8601.
  */
 ```
 
 | Campo | Invariante | Al violarse |
 |---|---|---|
-| `id` | `/^[0-9a-f]{8}-…-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i` | `ValidationError` |
+| `id` | UUID v4 **o** slug `^[a-z0-9][a-z0-9_-]{2,63}$` | `ValidationError` |
 | `title` | `1 ≤ length ≤ 80` tras recortar y colapsar espacios | `ValidationError` |
-| `section` | Pertenece a `SECTION_ORDER` | `ValidationError` |
+| `sectionId` | Pertenece a `BLOCK_CATALOG` | `ValidationError` |
+| `daysOfWeek` | Enteros 0–6, sin duplicados, ordenados; los siete colapsan a `[]` | `ValidationError` |
+| `timeStart`, `timeEnd` | `HH:mm` si están presentes | `ValidationError` |
+| `isAnchor` | Booleano; por defecto, el del bloque | — |
 | `order` | Entero `≥ 0` | `ValidationError` |
-| `estimatedMinutes` | `0 ≤ n ≤ 1440`, redondeado | `ValidationError` |
+| `estimatedMinutes` | `0 ≤ n ≤ 1440`; por defecto, la duración del rango, o 5 | — |
 | `isArchived` | Coaccionado a booleano | — |
 | `createdAt` | ISO 8601 parseable | `ValidationError` |
+
+> **Por qué el `id` admite slugs.** La rutina precargada (`seedData.js`) usa
+> identificadores legibles y estables (`task-tue-class`). Eso hace la siembra
+> idempotente —re-sembrar sobrescribe, no duplica— y mantiene legibles los
+> `daily_logs` históricos, cuyas claves son identificadores de tarea.
+
+> **`daysOfWeek` vacío no significa «ninguno», significa «todos».** Es la
+> convención del esquema, y colapsar los siete días al array vacío evita dos
+> representaciones del mismo hecho.
 
 ### 1.2. `TaskExecutionRecord` y `DailyLog`
 
@@ -92,7 +109,8 @@ migración de la v1) y todo dato que sale hacia la persistencia atraviesa
 | I3 | `completionRate = min(1, completedCount / computables)`, `0` si `computables = 0` | Evita división por cero y ratios > 1 |
 | I4 | `completedCount` se **recalcula** desde `entries` si hay registros | Un backup manipulado no puede inflar la racha |
 | I5 | Con `entries` vacío se acepta el `completedCount` declarado | Permite migrar logs agregados de la v1 |
-| I6 | Las claves de `entries` son UUID v4 | Impide claves sintéticas de orígenes no fiables |
+| I6 | Las claves de `entries` son identificadores de tarea válidos (UUID v4 o slug) | Impide claves sintéticas de orígenes no fiables |
+| I7 | `totalActiveTasks` es el número de tareas **aplicables ese día** | Un lunes sin clase no puede penalizar por no haber ido a clase |
 
 > **I4 e I5 no se contradicen**: la regla es "los registros mandan cuando
 > existen". Un log migrado desde la v1 sólo tiene agregados, y perderlos
@@ -130,14 +148,14 @@ no alteran el cociente.
 
 ## 2. Esquema de persistencia
 
-**Base:** `routine_tracker_db` · **Versión:** `2` ·
+**Base:** `routine_tracker_db` · **Versión:** `3` ·
 Implementación: `src/storage/indexedDbService.js`.
 
 ### 2.1. Object stores
 
 | Store | keyPath | Índices | Cardinalidad esperada |
 |---|---|---|---|
-| `tasks` | `id` | `idx_section` → `section`, `idx_order` → `order`, `idx_archived` → `archivedFlag` | 10¹–10² |
+| `tasks` | `id` | `idx_section` → `sectionId`, `idx_order` → `order`, `idx_archived` → `archivedFlag` | 10¹–10² |
 | `daily_logs` | `date` | `idx_completion_rate` → `completionRate` | 10²–10³ (1/día) |
 | `system_metadata` | `key` | — | 3–5 |
 
@@ -183,10 +201,25 @@ existencia de la API no basta.
 
 | Origen | Destino | Acción |
 |---|---|---|
-| — (instalación limpia) | 2 | Crear los tres stores y sus índices |
-| IndexedDB v1 | 2 | Crear `daily_logs` y `system_metadata`; conservar `app_state` para la migración de datos |
-| `localStorage:APP_STATE_V1` | 2 | `repository.migrateLegacy()` |
-| Backup JSON (cualquier v2) | 2 | `repository.importBackup()` con validación previa |
+| — (instalación limpia) | 3 | Crear los tres stores y sus índices |
+| IndexedDB v1 | 3 | Crear `daily_logs` y `system_metadata`; conservar `app_state` para la migración de datos |
+| IndexedDB v2 | 3 | Recrear `idx_section` con `keyPath: 'sectionId'` y reescribir las tareas (`repository.migrateSchema()`) |
+| `localStorage:APP_STATE_V1` | 3 | `repository.migrateLegacy()` |
+| Backup JSON (v2 o v3) | 3 | `repository.importBackup()` con validación previa |
+
+### 3.0. v2 → v3: de bloques genéricos a agenda
+
+| Origen v2 | Destino v3 | Regla |
+|---|---|---|
+| `section: 'morning' \| 'afternoon' \| 'evening' \| 'anytime'` | `sectionId: 'anytime'` | Ningún bloque genérico tiene equivalente horario declarado |
+| — | `daysOfWeek: []` | Las tareas de la v2 aplicaban todos los días |
+| — | `isAnchor` | Heredado del bloque de destino (`anytime` → `false`) |
+| `idx_section` sobre `section` | `idx_section` sobre `sectionId` | Se borra y se recrea: el `keyPath` de un índice no se puede cambiar |
+
+Mapear `morning` a `dawn` (04:30–08:30) le inventaría al usuario un horario
+que nunca declaró, y en un fin de semana esa tarea desaparecería, porque
+`dawn` no existe sábados ni domingos. El cajón sin horario la mantiene visible
+todos los días y deja la decisión en manos de quien la creó.
 
 La conversión de datos **no ocurre dentro de `onupgradeneeded`**: esa
 transacción sólo admite API síncrona de IndexedDB, y la migración necesita
@@ -213,6 +246,107 @@ Propiedades de la migración:
   resto de la migración continúa. Un JSON ilegible se descarta entero.
 
 ---
+
+## 3 bis. Motor de bloques horarios
+
+Implementación: `src/domain/timeBlockService.js`. Funciones puras salvo el
+vigilante, que es la única pieza con temporizadores.
+
+### 3bis.1. Modelo
+
+Un bloque no tiene «un horario»: tiene una lista de **reglas**, y cada regla
+dice en qué días aplica y con qué horario.
+
+```javascript
+evening: {
+  id: 'evening', label: 'Tiempo personal', icon: '🌙', isAnchor: false,
+  rules: [
+    { days: [1, 3, 4], start: '17:00', end: '23:00' },  // L, X, J
+    { days: [2],       start: '20:30', end: '23:00' },  // M, al salir de clase
+  ],
+}
+```
+
+Un bloque sin regla para el día **no existe** ese día: no se renderiza, y sus
+tareas no cuentan para el divisor. Con este modelo, «el martes la tarde libre
+empieza más tarde» es un dato, no una rama de código.
+
+### 3bis.2. Agenda resultante
+
+| Día | Bloques, en orden |
+|---|---|
+| L, X, J | `dawn` · `work_morning` · `lunch` · `work_afternoon` · `evening` · `wind_down` · `anytime` |
+| Martes | …hasta `work_afternoon` · `didi_shift` · `commute_home` · `class_tuesday` · `evening`(20:30) · `wind_down` · `anytime` |
+| Viernes | …hasta `work_afternoon` · `commute_school` · `class_friday` · `commute_home_fri` · `night_weekend_prep` · `wind_down` · `anytime` |
+| Sábado | `weekend_morning`(05:00) · `weekend_afternoon` · `weekend_night` · `wind_down` · `anytime` |
+| Domingo | `weekend_morning`(06:00) · …igual que el sábado |
+
+`anytime` no tiene horario: es el cajón que recoge la migración desde la v2 y
+las tareas que no encajan en la agenda fija. Va siempre al final y nunca puede
+ser el bloque en curso.
+
+### 3bis.3. Bloque en curso: gana el más estrecho
+
+```
+activo(t) = argmin  (fin − inicio)
+            b ∈ agenda(día(t)), b.esHorario, inicio_b ≤ minuto(t) < fin_b
+```
+
+Los rangos se solapan a propósito. El viernes a las 23:30,
+`night_weekend_prep` (21:30–00:00) y `wind_down` (23:00–00:00) contienen el
+instante; gana el segundo porque es más específico. La alternativa —recortar
+`night_weekend_prep` a las 23:00— obligaría a mantener a mano una partición sin
+solapes cada vez que se añade un bloque, y la regla del más estrecho generaliza
+a cualquier bloque anidado.
+
+**Puede no haber bloque en curso.** A las 08:45 de un lunes (entre el arranque,
+que acaba a las 08:30, y la jornada, que empieza a las 09:00) la respuesta es
+`null`, y la interfaz lo dice en lugar de inventarse uno.
+
+### 3bis.4. Aplicabilidad de una tarea
+
+```
+aplica(tarea, fecha) ⇔ ¬tarea.isArchived
+                     ∧ (tarea.daysOfWeek = ∅ ∨ día(fecha) ∈ tarea.daysOfWeek)
+                     ∧ regla(tarea.sectionId, día(fecha)) ≠ null
+```
+
+La tercera condición es la que evita el caso incoherente: una tarea marcada
+«todos los días» dentro de `class_tuesday` no puede aparecer un jueves, porque
+ese bloque no existe ese día.
+
+Consecuencias, todas verificadas por pruebas:
+
+| Donde | Efecto |
+|---|---|
+| `taskList.js` | Lo que no aplica no llega al DOM; sus ítems se desmontan y sus reconocedores de gestos se destruyen |
+| `routineService` | `toggleTask`/`skipTask` rechazan una tarea que no aplica hoy, aunque el comando llegue desde la consola |
+| `repository.ensureLog` | `totalActiveTasks` = tareas aplicables ese día |
+| `dayResetService` | La reconciliación de ausencias pasa `activeTasksFor(date)`: cada día perdido se juzga con su propio divisor |
+
+Con la rutina precargada, el divisor es 5 los lunes, miércoles y jueves; **8**
+los martes y viernes; y **2** los fines de semana.
+
+### 3bis.5. Vigilante horario
+
+`TimeBlockWatcher` notifica el cambio de bloque **sin recargar la página**.
+
+```
+   start() ──▶ check() ──▶ ¿cambió el bloque o el día? ──sí──▶ onChange()
+                  ▲                                             │
+                  │                                             ▼
+                  └── temporizador al siguiente borde ◀── _schedule()
+                  └── tick de seguridad cada 60 s
+                  └── visibilitychange / focus
+```
+
+- Se programa al **siguiente borde de bloque**, no a un sondeo fijo: entre las
+  09:00 y las 14:00 de un lunes no hay nada que comprobar.
+- El tick de seguridad existe porque los temporizadores se congelan con la
+  pestaña en segundo plano o el dispositivo suspendido.
+- La primera resolución no es una transición: la aplicación arranca ya dentro
+  de un bloque, y notificarlo como cambio haría vibrar el móvil al abrir la
+  app.
 
 ## 4. Algoritmo de racha resiliente
 
@@ -654,11 +788,12 @@ ordenados por esa clave en los dos motores.
 | Comando | Efecto | Evento emitido |
 |---|---|---|
 | `hydrate()` | Carga el estado persistido; siembra la rutina inicial en el primer arranque | `app:ready` |
-| `toggleTask(id, force?)` | Alterna completado del día activo | `task:toggled` |
+| `toggleTask(id, force?)` | Alterna completado del día activo; rechaza tareas que no aplican hoy | `task:toggled` |
 | `skipTask(id, force?)` | Dispensa la tarea (sale del denominador) | `task:skipped` |
 | `saveTask(input)` | Alta o edición; re-sincroniza el total del log | `task:saved` |
 | `archiveTask(id)` | Soft-delete | `task:archived` |
 | `reorderTasks(ids)` | Reasigna `order` consecutivo | `tasks:reordered` |
+| `refreshTimeContext(now?)` | Recalcula agenda y bloque en curso; despliega el que entra | — |
 | `setPreferences(patch)` | Persiste preferencias | — |
 | `exportBackup()` / `importBackup(payload)` | Volcado JSON | — |
 | `wipe()` | Borrado total y rehidratación | — |
@@ -768,19 +903,20 @@ al resto.
 
 ## 11. Matriz de pruebas
 
-`npm test` → **99 pruebas** con el runner nativo de Node, sin navegador ni
+`npm test` → **132 pruebas** con el runner nativo de Node, sin navegador ni
 dependencias.
 
 | Archivo | Cubre | Casos destacados |
 |---|---|---|
-| `tests/dateUtils.test.js` | Claves de día locales | Medianoche en husos negativos, años bisiestos, fechas inexistentes, lunes = 0 |
-| `tests/taskValidator.test.js` | Contratos e invariantes | I1–I6, saneado de rachas corruptas, rechazo de claves no-UUID, preferencias con claves ajenas |
+| `tests/dateUtils.test.js` | Claves de día y horas | Medianoche en husos negativos, bisiestos, `parseTime`/`formatMinutes`, fin `00:00` como 1440 |
+| `tests/timeBlockService.test.js` | Motor de agenda | Agenda exacta de cada día de la semana, horarios condicionales del martes y del fin de semana, bloque más estrecho en solapes, huecos sin bloque, divisor por día con la rutina real, vigilante horario |
+| `tests/taskValidator.test.js` | Contratos e invariantes | I1–I7, slugs de la semilla, `daysOfWeek` normalizado, herencia de `isAnchor`, duración deducida del rango |
 | `tests/streakCalculator.test.js` | Algoritmo completo | Umbrales, tope de escudos a 28 días, reconciliación con y sin tareas activas, truncado a 400 días, convergencia del EWMA, proyección sin mutación |
 | `tests/gestures.test.js` | Máquina del swipe | Tap frente a arrastre, bloqueo de eje, confirmación por distancia y por velocidad, `pointercancel`, tramo lineal hasta el 50 %, monotonía y decrecimiento de la fricción, `overshoot`, limpieza de listeners |
 | `tests/deployPaths.test.js` | Rutas de despliegue | Ninguna ruta absoluta en HTML, CSS, imports, manifest ni precaché; resolución de `start_url`/`scope`/iconos bajo `/App-rutina-/`; registro del SW con alcance relativo |
 | `tests/events.test.js` | EventBus | Aislamiento de errores, baja durante la emisión, `once`, `onAny` |
-| `tests/repository.test.js` | Persistencia y servicio | Orden por bloque, soft-delete, export/import, import con registros corruptos, migración completa desde `APP_STATE_V1`, siembra de bienvenida y su idempotencia, plegado por defecto, UI optimista y su reversión ante fallo |
-| `tests/dayResetService.test.js` | Corte de medianoche | Cierre y extensión, rotura, escudo, ausencia de 4 días, idempotencia, congelación por reloj retrasado, deshielo y reevaluación, retroceso dentro del rango evaluado, recarga del historial |
+| `tests/repository.test.js` | Persistencia y servicio | Orden por bloque y hora, soft-delete, export/import, migración desde `APP_STATE_V1`, siembra real e idempotente, divisor por día, rechazo de tareas de otro día, plegado por defecto, UI optimista y su reversión |
+| `tests/dayResetService.test.js` | Corte de medianoche | Cierre y extensión, rotura, escudo, ausencia de 4 días con divisor por agenda, idempotencia, congelación por reloj retrasado, deshielo y reevaluación, recarga del historial |
 
 Comprobaciones estáticas en CI: `node --check` sobre todos los módulos, validez
 del manifest, coherencia del precaché y reproducibilidad de los iconos
@@ -798,13 +934,14 @@ GitHub Pages, que es donde una ruta absoluta se rompería.
 
 | # | Verificación |
 |---|---|
-| 1 | Arranque real: motor `IndexedDB` y rutina de bienvenida de 4 tareas, una por bloque |
+| 1 | Arranque real: motor `IndexedDB`, semilla real y filtrado estricto (ninguna tarea ni bloque de otro día en el DOM) |
+| 1 bis | Bloque en curso: como mucho uno destacado, desplegado y con su etiqueta |
 | 2 | Ergonomía medida sobre el render: barra anclada al borde inferior, FAB de 56 × 56, cabecera con **cero** controles, ningún objetivo táctil por debajo de 48 px |
 | 3 | Bloques plegables: estado inicial, `aria-expanded`, plegado y desplegado por toque |
 | 4 | UI optimista: la clase se aplica antes de que resuelva la escritura, y el anillo avanza |
 | 5 | Swipe izquierdo: dispensa la tarea |
 | 6 | Hoja inferior: apertura, cierre por arrastre, cierre con Escape, `aria-modal` |
-| 7 | Alta de tarea desde la hoja, con control segmentado de bloque |
+| 7 | Alta de tarea con bloque y días; una tarea de otro día no se renderiza; el selector de días deshabilita los que el bloque no cubre |
 | 8 | Hojas de histórico y ajustes; el heatmap pinta píxeles dentro de la hoja |
 | 9 | Persistencia del estado tras recargar |
 | 10 | Service Worker: alcance `/App-rutina-/`, script correcto y 37 recursos precacheados bajo esa ruta |
@@ -841,3 +978,9 @@ usuario; el código las trata como opcionales y degrada si faltan.
 | Congelar el día ante reloj atrasado | Reevaluar con la fecha nueva | Reevaluar reescribe logs cerrados y borra rachas legítimas por un viaje de husos |
 | Semilla de 4 hábitos | Empezar vacío; o semilla larga | Vacío obliga a configurar antes de entender; larga se percibe como deberes ajenos |
 | `scope` del SW derivado de `registration.scope` | Rutas relativas al worker | El mismo código sirve en `/`, en `/<repo>/` y en cualquier subruta, sin suposiciones |
+| Bloques con lista de reglas por día | Un bloque por variante horaria | «El martes la tarde libre empieza a las 20:30» es un dato, no un bloque duplicado |
+| Bloque en curso = el más estrecho | Partición sin solapes, prioridades a mano | Generaliza a cualquier bloque anidado sin recortar rangos cada vez que se añade uno |
+| Divisor = tareas aplicables al día | Total de tareas del usuario | Con agenda semanal, dividir entre todas penalizaría por no hacer el martes lo del viernes |
+| Slugs estables en la semilla | UUID generados | Re-sembrar no duplica y los logs históricos siguen siendo legibles |
+| Migrar los bloques v2 al cajón sin horario | Mapear `morning` → `dawn` | Inventaría un horario no declarado y la tarea desaparecería los fines de semana |
+| Temporizador al siguiente borde de bloque | Sondeo cada N segundos | Entre las 09:00 y las 14:00 de un lunes no hay nada que comprobar |

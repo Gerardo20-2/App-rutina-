@@ -9,6 +9,7 @@ import { Store, createInitialState } from '../src/core/store.js';
 import { EventBus } from '../src/core/events.js';
 import { RESET_STATE, EVENTS } from '../src/core/constants.js';
 import { toDateKey, fromDateKey, addDays } from '../src/core/dateUtils.js';
+import { tasksForDay, countTasksForDay } from '../src/domain/timeBlockService.js';
 
 /** Reloj controlable: devuelve el mediodía de la clave de día indicada. */
 function clockAt(dateKey) {
@@ -41,7 +42,7 @@ test('el corte de medianoche cierra el día y extiende la racha', async () => {
   const day0 = store.getState().today;
   const day1 = addDays(day0, 1);
 
-  for (const task of store.getState().tasks) await service.toggleTask(task.id);
+  for (const task of tasksForDay(store.getState().tasks, day0)) await service.toggleTask(task.id);
   assert.equal(store.getState().log.completionRate, 1);
 
   const rolled = [];
@@ -58,7 +59,8 @@ test('el corte de medianoche cierra el día y extiende la racha', async () => {
 
   const closed = await repository.getLog(day0);
   assert.equal(closed.closed, true, 'el día anterior queda cerrado');
-  assert.equal(closed.completedCount, store.getState().log.totalActiveTasks);
+  assert.equal(closed.completedCount, countTasksForDay(store.getState().tasks, day0),
+    'se cerró con las tareas que aplicaban ese día, no con el total');
 
   assert.equal(rolled.length, 1);
   assert.equal(rolled[0].from, day0);
@@ -131,7 +133,7 @@ test('una ausencia de varios días se reconcilia en un solo arranque', async () 
 test('check() es idempotente: dos llamadas no evalúan el día dos veces', async () => {
   const { repository, store, bus, service } = await makeApp();
   const day0 = store.getState().today;
-  for (const task of store.getState().tasks) await service.toggleTask(task.id);
+  for (const task of tasksForDay(store.getState().tasks, day0)) await service.toggleTask(task.id);
 
   const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, 1)) });
   await reset.check('first');
@@ -180,7 +182,7 @@ test('un reloj por detrás del último día evaluado congela el cálculo diario'
   assert.equal(events[0].frozen, true);
 
   // Mientras está congelado, marcar tareas sigue funcionando.
-  const [task] = state.tasks;
+  const [task] = tasksForDay(state.tasks, state.today);
   await service.toggleTask(task.id);
   assert.equal(store.getState().log.completedCount, 1);
 
@@ -236,7 +238,7 @@ test('un retroceso dentro del rango ya evaluado sólo reapunta el día activo', 
 test('el historial del heatmap se recarga tras el corte', async () => {
   const { repository, store, bus, service } = await makeApp();
   const day0 = store.getState().today;
-  for (const task of store.getState().tasks) await service.toggleTask(task.id);
+  for (const task of tasksForDay(store.getState().tasks, day0)) await service.toggleTask(task.id);
 
   const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, 1)) });
   await reset.check('test');
@@ -254,4 +256,23 @@ test('start() y stop() no dejan temporizadores activos', async () => {
   reset.stop();
   assert.equal(reset.state, RESET_STATE.IDLE);
   assert.equal(toDateKey(), store.getState().today);
+});
+
+test('cada día se evalúa con el divisor de su propia agenda', async () => {
+  const { repository, store, bus } = await makeApp();
+  const day0 = store.getState().today;
+  const tasks = store.getState().tasks;
+
+  await setStreak(repository, store, { currentStreak: 2, bestStreak: 2, lastEvaluatedDate: addDays(day0, -1) });
+
+  // Cuatro días sin abrir la app: cada uno se juzga por lo que le tocaba.
+  const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, 4)) });
+  await reset.check('bootstrap');
+
+  const logs = await repository.listLogs(day0, addDays(day0, 3));
+  assert.ok(logs.length > 0);
+  for (const log of logs) {
+    assert.equal(log.totalActiveTasks, countTasksForDay(tasks, log.date),
+      `el divisor de ${log.date} debe salir de su agenda`);
+  }
 });

@@ -26,6 +26,7 @@ import { RESET_STATE, EVENTS, STREAK_CONFIG, LIMITS } from '../core/constants.js
 import { toDateKey, msUntilNextMidnight, diffDays, addDays } from '../core/dateUtils.js';
 import { applyDay, reconcile } from './streakCalculator.js';
 import { buildHistory } from './selectors.js';
+import { countTasksForDay } from './timeBlockService.js';
 
 /** Periodo del tick de seguridad (ms). */
 const SAFETY_TICK_MS = 30_000;
@@ -173,6 +174,9 @@ export class DayResetService {
 
     const tasks = await this._repository.listTasks();
     let streak = await this._repository.getStreak();
+    // El divisor de cada día lo fija su propia agenda: lo que aplicaba ese día
+    // de la semana, no el total de tareas del usuario.
+    const activeTasksFor = (date) => countTasksForDay(tasks, date);
 
     // 1. Cierre del día anterior con los datos realmente persistidos.
     const previousLog = await this._repository.getLog(previousDay);
@@ -184,7 +188,7 @@ export class DayResetService {
       if (streak.lastEvaluatedDate === null || diffDays(streak.lastEvaluatedDate, previousDay) > 0) {
         // Días huérfanos anteriores al que cerramos ahora.
         this.state = RESET_STATE.RECONCILING;
-        const gapResult = await this._reconcileGap(streak, previousDay, tasks.length);
+        const gapResult = await this._reconcileGap(streak, previousDay, activeTasksFor);
         streak = gapResult.state;
         evaluations.push(...gapResult.evaluations);
 
@@ -196,14 +200,14 @@ export class DayResetService {
 
     // 2. Días sin registro alguno (app cerrada) hasta ayer inclusive.
     this.state = RESET_STATE.RECONCILING;
-    const tailResult = await this._reconcileGap(streak, today, tasks.length);
+    const tailResult = await this._reconcileGap(streak, today, activeTasksFor);
     streak = tailResult.state;
     evaluations.push(...tailResult.evaluations);
 
     streak = await this._repository.saveStreak(streak);
 
     // 3. Apertura del nuevo día.
-    await this._openDay(today, tasks.length);
+    await this._openDay(today, activeTasksFor(today));
 
     const history = await this._loadHistory(today);
     this._store.setState({ streak, history });
@@ -220,9 +224,9 @@ export class DayResetService {
   /**
    * @param {import('./streakCalculator.js').StreakState} streak
    * @param {string} throughDate
-   * @param {number} activeTaskCount
+   * @param {(date: string) => number} activeTasksFor
    */
-  async _reconcileGap(streak, throughDate, activeTaskCount) {
+  async _reconcileGap(streak, throughDate, activeTasksFor) {
     if (streak.lastEvaluatedDate === null) {
       return { state: { ...streak, lastEvaluatedDate: addDays(throughDate, -1) }, evaluations: [] };
     }
@@ -235,7 +239,7 @@ export class DayResetService {
     for (const log of logs) byDate[log.date] = log;
 
     return reconcile(streak, byDate, throughDate, {
-      defaultActiveTasks: activeTaskCount,
+      activeTasksFor,
       config: STREAK_CONFIG,
     });
   }
@@ -245,8 +249,10 @@ export class DayResetService {
    * @param {number} [taskCount]
    */
   async _openDay(date, taskCount) {
-    const tasks = taskCount === undefined ? (await this._repository.listTasks()).length : taskCount;
-    const log = await this._repository.ensureLog(date, tasks);
+    const applicable = taskCount === undefined
+      ? countTasksForDay(await this._repository.listTasks(), date)
+      : taskCount;
+    const log = await this._repository.ensureLog(date, applicable);
     this._store.setState({ today: date, log });
   }
 

@@ -12,8 +12,12 @@
 /** @type {string} Nombre de la base IndexedDB. */
 export const DB_NAME = 'routine_tracker_db';
 
-/** @type {number} Versión del esquema IndexedDB (v2 = tasks + daily_logs + system_metadata). */
-export const DB_VERSION = 2;
+/**
+ * @type {number} Versión del esquema IndexedDB.
+ *   v2 — tasks + daily_logs + system_metadata con bloques genéricos.
+ *   v3 — bloques horarios por día: `sectionId`, `daysOfWeek`, `timeStart/End`, `isAnchor`.
+ */
+export const DB_VERSION = 3;
 
 /** Nombres de object stores. @enum {string} */
 export const STORES = Object.freeze({
@@ -27,7 +31,7 @@ export const STORES = Object.freeze({
 /** Índices declarados por store. @enum {Object.<string,string>} */
 export const INDICES = Object.freeze({
   [STORES.TASKS]: Object.freeze({
-    idx_section: 'section',
+    idx_section: 'sectionId',
     idx_order: 'order',
     idx_archived: 'isArchived',
   }),
@@ -52,36 +56,18 @@ export const LS_KEYS = Object.freeze({
 });
 
 /** Identificador del caché del Service Worker (sincronizado manualmente con `public/sw.js`). */
-export const CACHE_NAME = 'routine-tracker-v2';
+export const CACHE_NAME = 'routine-tracker-v3';
 
 /* ------------------------------------------------------------------ *
  * Dominio
  * ------------------------------------------------------------------ */
 
-/** Bloques del día. @enum {string} */
-export const SECTIONS = Object.freeze({
-  MORNING: 'morning',
-  AFTERNOON: 'afternoon',
-  EVENING: 'evening',
-  ANYTIME: 'anytime',
-});
-
-/** @type {ReadonlyArray<string>} Orden canónico de render de los bloques. */
-export const SECTION_ORDER = Object.freeze([
-  SECTIONS.MORNING,
-  SECTIONS.AFTERNOON,
-  SECTIONS.EVENING,
-  SECTIONS.ANYTIME,
-]);
-
-/** Metadatos de presentación por bloque. */
-export const SECTION_META = Object.freeze({
-  [SECTIONS.MORNING]: { label: 'Mañana', short: 'Mañana', icon: '☀️', range: '05:00 – 12:00' },
-  [SECTIONS.AFTERNOON]: { label: 'Tarde', short: 'Tarde', icon: '🌤️', range: '12:00 – 19:00' },
-  [SECTIONS.EVENING]: { label: 'Noche', short: 'Noche', icon: '🌙', range: '19:00 – 00:00' },
-  // `short` cabe en una celda del control segmentado; `label` titula el bloque.
-  [SECTIONS.ANYTIME]: { label: 'Cualquier momento', short: 'Libre', icon: '🕒', range: 'Libre' },
-});
+/**
+ * Los bloques del día ya no son una enumeración fija de cuatro valores: son la
+ * agenda real del usuario, condicionada por el día de la semana, y viven en
+ * `src/domain/timeBlockService.js` (`BLOCK_CATALOG`). Aquí sólo quedan los
+ * parámetros que no dependen de esa agenda.
+ */
 
 /** Resultado de la evaluación de un día cerrado. @enum {string} */
 export const DAY_OUTCOME = Object.freeze({

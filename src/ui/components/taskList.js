@@ -1,24 +1,20 @@
 /**
  * @module ui/components/taskList
- * Contenedor de tareas agrupadas por bloque del día, con bloques plegables.
+ * Agenda del día: bloques horarios plegables con sus tareas.
  *
- * El render es **reconciliado por clave** (`task.id`): los ítems existentes se
- * actualizan en lugar de recrearse. Recrear el DOM en cada cambio destruiría
- * el reconocedor de gestos en pleno arrastre y reiniciaría las transiciones
- * CSS a mitad de animación.
+ * Los bloques que se renderizan son los que **existen hoy** según el día de la
+ * semana y tienen al menos una tarea aplicable; el resto no llega al DOM. El
+ * bloque en curso se destaca y se despliega solo.
  *
- * ## Por qué se pliegan los bloques
- *
- * Una rutina completa son cuatro bloques y una docena larga de tareas: más de
- * dos pantallas de scroll en un móvil. A las ocho de la mañana, las tareas de
- * la noche son ruido. Por defecto sólo queda abierto el bloque de la hora
- * actual; el resto se despliega con un toque en su cabecera, que es un
- * objetivo táctil de ancho completo.
+ * El render es **reconciliado por clave** (`task.id`, `block.id`): los ítems
+ * existentes se actualizan en lugar de recrearse. Recrear el DOM en cada
+ * cambio destruiría el reconocedor de gestos en pleno arrastre y reiniciaría
+ * las transiciones CSS a mitad de animación.
  */
 
 import { h, clear } from '../dom.js';
 import { createTaskItem } from './taskItem.js';
-import { groupBySection } from '../../domain/selectors.js';
+import { groupByBlock } from '../../domain/selectors.js';
 
 /**
  * @param {{
@@ -33,13 +29,16 @@ import { groupBySection } from '../../domain/selectors.js';
 export function createTaskList(handlers) {
   /** @type {Map<string, ReturnType<typeof createTaskItem>>} */
   const items = new Map();
-  /** @type {Map<string, {section: HTMLElement, list: HTMLElement, counter: HTMLElement, toggle: HTMLElement}>} */
+  /** @type {Map<string, Object>} */
   const sections = new Map();
 
   const empty = h('div', { class: 'empty', hidden: true }, [
     h('p', { class: 'empty__icon', 'aria-hidden': 'true', text: '🌱' }),
-    h('h2', { class: 'empty__title', text: 'Tu rutina está vacía' }),
-    h('p', { class: 'empty__text', text: 'Añade la primera tarea y empieza a construir tu racha.' }),
+    h('h2', { class: 'empty__title', text: 'Hoy no hay nada programado' }),
+    h('p', {
+      class: 'empty__text',
+      text: 'Ninguna tarea aplica a este día de la semana. Añade una o revisa sus días activos.',
+    }),
     h('button', {
       class: 'btn btn--primary', type: 'button', text: 'Añadir tarea', onClick: () => handlers.onCreate(),
     }),
@@ -50,7 +49,11 @@ export function createTaskList(handlers) {
 
   /** @param {import('../../core/store.js').AppState} state */
   function update(state) {
-    const groups = groupBySection(state.tasks, state.log);
+    const groups = groupByBlock(state.tasks, state.log, {
+      date: state.today,
+      schedule: state.schedule,
+      activeBlockId: state.ui.activeBlockId,
+    });
     const collapsed = new Set(state.ui.collapsedSections ?? []);
     empty.hidden = groups.length > 0;
     container.hidden = groups.length === 0;
@@ -59,17 +62,21 @@ export function createTaskList(handlers) {
     const seenSections = new Set();
 
     groups.forEach((group, index) => {
-      seenSections.add(group.section);
-      const entry = sections.get(group.section) ?? createSection(group);
-      const isCollapsed = collapsed.has(group.section);
+      seenSections.add(group.id);
+      const entry = sections.get(group.id) ?? createSection(group);
+      const isCollapsed = collapsed.has(group.id);
 
       entry.counter.textContent = `${group.completed}/${group.tasks.length}`;
+      entry.range.textContent = group.range;
+      entry.badge.hidden = !group.isActive;
       entry.section.dataset.complete = String(group.completed === group.tasks.length);
       entry.section.dataset.collapsed = String(isCollapsed);
+      entry.section.dataset.active = String(group.isActive);
+      entry.section.dataset.anchor = String(group.isAnchor);
       entry.toggle.setAttribute('aria-expanded', String(!isCollapsed));
       entry.list.hidden = isCollapsed;
 
-      // `appendChild` sobre un nodo ya presente lo mueve: así el orden de los
+      // `insertBefore` sobre un nodo ya presente lo mueve: así el orden de los
       // bloques se corrige sin desmontar nada.
       if (container.children[index] !== entry.section) {
         container.insertBefore(entry.section, container.children[index] ?? null);
@@ -97,52 +104,63 @@ export function createTaskList(handlers) {
       });
     });
 
+    // Las tareas que hoy no aplican se desmontan: no basta con ocultarlas, no
+    // deben existir en el DOM ni conservar reconocedores de gestos vivos.
     for (const [id, item] of items) {
       if (seenTasks.has(id)) continue;
       item.destroy();
       item.el.remove();
       items.delete(id);
     }
-    for (const [name, entry] of sections) {
-      if (seenSections.has(name)) continue;
+    for (const [id, entry] of sections) {
+      if (seenSections.has(id)) continue;
       entry.section.remove();
-      sections.delete(name);
+      sections.delete(id);
     }
   }
 
-  /** @param {{section: string, label: string, icon: string, range: string}} group */
+  /** @param {Object} group */
   function createSection(group) {
     const counter = h('span', { class: 'section__counter' });
-    const list = h('ul', { class: 'section__list', role: 'list', id: `section-list-${group.section}` });
+    const range = h('span', { class: 'section__range', text: group.range });
+    const badge = h('span', { class: 'section__badge', hidden: true }, [
+      h('span', { class: 'section__pulse', 'aria-hidden': 'true' }),
+      'Bloque en curso',
+    ]);
+    const list = h('ul', { class: 'section__list', role: 'list', id: `section-list-${group.id}` });
+
     const toggle = h('button', {
       class: 'section__toggle',
       type: 'button',
       'aria-expanded': 'true',
-      'aria-controls': `section-list-${group.section}`,
+      'aria-controls': `section-list-${group.id}`,
       onClick: () => {
         handlers.haptics?.fire('TAP');
-        handlers.onToggleSection(group.section);
+        handlers.onToggleSection(group.id);
       },
     }, [
       h('span', { class: 'section__icon', 'aria-hidden': 'true', text: group.icon }),
       h('span', { class: 'section__label' }, [
-        h('span', { class: 'section__name', text: group.label }),
-        h('span', { class: 'section__range', text: group.range }),
+        h('span', { class: 'section__name' }, [
+          group.label,
+          group.isAnchor ? h('span', { class: 'section__anchor', title: 'Bloque rígido', text: '📌' }) : null,
+        ]),
+        h('span', { class: 'section__meta' }, [range, badge]),
       ]),
       counter,
       h('span', { class: 'section__chevron', 'aria-hidden': 'true', text: '⌄' }),
     ]);
 
     const section = h('section', {
-      class: 'section', dataset: { section: group.section },
-      'aria-labelledby': `section-${group.section}`,
+      class: 'section', dataset: { section: group.id },
+      'aria-labelledby': `section-${group.id}`,
     }, [
-      h('h2', { class: 'section__head', id: `section-${group.section}` }, [toggle]),
+      h('h2', { class: 'section__head', id: `section-${group.id}` }, [toggle]),
       list,
     ]);
 
-    const entry = { section, list, counter, toggle };
-    sections.set(group.section, entry);
+    const entry = { section, list, counter, toggle, badge, range };
+    sections.set(group.id, entry);
     return entry;
   }
 

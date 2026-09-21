@@ -21,8 +21,8 @@ import {
   DB_VERSION,
   DEFAULT_PREFERENCES,
   INITIAL_STREAK_STATE,
-  SECTION_ORDER,
 } from '../core/constants.js';
+import { BLOCK_IDS, FALLBACK_BLOCK_ID, isBlockId } from '../domain/timeBlockService.js';
 import {
   validateTask,
   validateDailyLog,
@@ -31,9 +31,9 @@ import {
   createDailyLog,
   createTask,
   uuid,
-  isUuid,
+  isTaskId,
 } from '../domain/taskValidator.js';
-import { toDateKey, isDateKey, addDays } from '../core/dateUtils.js';
+import { toDateKey, isDateKey, addDays, parseTime } from '../core/dateUtils.js';
 
 export class Repository {
   /** @param {{adapter?: import('./storageAdapter.js').StorageAdapter}} [options] */
@@ -41,8 +41,8 @@ export class Repository {
     /** @type {import('./storageAdapter.js').StorageAdapter|null} */
     this._adapter = options.adapter ?? null;
     this._opened = false;
-    /** @type {{legacyMigrated: boolean, upgraded: {from:number,to:number}|null}} */
-    this.diagnostics = { legacyMigrated: false, upgraded: null };
+    /** @type {{legacyMigrated: boolean, upgraded: {from:number,to:number}|null, schemaMigrated: Object|null}} */
+    this.diagnostics = { legacyMigrated: false, upgraded: null, schemaMigrated: null };
   }
 
   /** @returns {string} motor efectivo. */
@@ -83,9 +83,48 @@ export class Repository {
     }
 
     this._opened = true;
+    // La versión almacenada se lee ANTES de que `_ensureMetadata` la reescriba.
+    const storedVersion = await this.getMeta(META_KEYS.SCHEMA_VERSION);
     await this._ensureMetadata();
+    await this.migrateSchema(storedVersion);
     await this.migrateLegacy();
     return this;
+  }
+
+  /**
+   * Migración de datos entre versiones del esquema. La v3 añade agenda por día
+   * a las tareas: `sectionId`, `daysOfWeek`, `timeStart/End` e `isAnchor`.
+   *
+   * Los bloques genéricos de la v2 (`morning`, `afternoon`, `evening`,
+   * `anytime`) no tienen equivalente en la agenda real —nadie declaró a qué
+   * hora eran—, así que sus tareas se recogen en el cajón sin horario, donde
+   * siguen visibles todos los días y el usuario puede reasignarlas.
+   *
+   * @param {*} storedVersion versión leída de `system_metadata`.
+   * @returns {Promise<number>} tareas migradas.
+   */
+  async migrateSchema(storedVersion) {
+    const rows = await this._adapter.getAll(STORES.TASKS);
+    const pending = rows.filter((row) => row && (!isBlockId(row.sectionId) || row.section !== undefined));
+    if (pending.length === 0) return 0;
+
+    /** @type {Array<*>} */
+    const migrated = [];
+    for (const row of rows) {
+      try {
+        const { section, ...rest } = stripInternal(row);
+        migrated.push(withInternal(validateTask({
+          ...rest,
+          sectionId: isBlockId(rest.sectionId) ? rest.sectionId : FALLBACK_BLOCK_ID,
+          daysOfWeek: rest.daysOfWeek ?? [],
+        })));
+      } catch (error) {
+        console.warn('[Repository] tarea descartada al migrar a la v3', row, error);
+      }
+    }
+    await this._adapter.bulkPut(STORES.TASKS, migrated);
+    this.diagnostics.schemaMigrated = { from: Number(storedVersion) || 2, to: DB_VERSION, tasks: pending.length };
+    return pending.length;
   }
 
   /* ---------------------------------------------------------------- *
@@ -117,7 +156,7 @@ export class Repository {
     if (existing) {
       draft = validateTask({ ...stripInternal(existing), ...input });
     } else {
-      const order = input.order ?? (await this._nextOrder(input.section ?? 'anytime'));
+      const order = input.order ?? (await this._nextOrder(input.sectionId ?? FALLBACK_BLOCK_ID));
       draft = createTask({ ...input, order });
     }
     await this._adapter.put(STORES.TASKS, withInternal(draft));
@@ -361,13 +400,15 @@ export class Repository {
     const idMap = new Map();
 
     (Array.isArray(legacy?.tasks) ? legacy.tasks : []).forEach((legacyTask, index) => {
-      const id = isUuid(legacyTask?.id) ? legacyTask.id : uuid();
+      const id = isTaskId(legacyTask?.id) ? legacyTask.id : uuid();
       if (legacyTask?.id) idMap.set(String(legacyTask.id), id);
       try {
         tasks.push(withInternal(createTask({
           id,
           title: legacyTask?.title,
-          section: SECTION_ORDER.includes(legacyTask?.section) ? legacyTask.section : 'anytime',
+          // La v1 no tenía agenda: sus tareas van al cajón sin horario.
+          sectionId: FALLBACK_BLOCK_ID,
+          daysOfWeek: [],
           order: Number.isFinite(Number(legacyTask?.order)) ? Number(legacyTask.order) : index,
           estimatedMinutes: 5,
           isArchived: false,
@@ -472,11 +513,11 @@ export class Repository {
     }
   }
 
-  /** @param {string} section @returns {Promise<number>} */
-  async _nextOrder(section) {
+  /** @param {string} sectionId @returns {Promise<number>} */
+  async _nextOrder(sectionId) {
     const tasks = await this.listTasks({ includeArchived: true });
-    const inSection = tasks.filter((task) => task.section === section);
-    return inSection.length === 0 ? 0 : Math.max(...inSection.map((t) => t.order)) + 1;
+    const inBlock = tasks.filter((task) => task.sectionId === sectionId);
+    return inBlock.length === 0 ? 0 : Math.max(...inBlock.map((task) => task.order)) + 1;
   }
 }
 
@@ -504,16 +545,30 @@ function safeTask(row) {
 }
 
 /**
- * Orden canónico: bloque del día y, dentro de él, el `order` manual.
+ * Orden canónico: bloque, después la hora de referencia y, a igualdad, el
+ * `order` manual. Ordenar por hora dentro del bloque evita que dos tareas con
+ * el mismo `order` aparezcan en orden arbitrario, y hace que la lista siga la
+ * secuencia real del día.
  * @param {import('../domain/taskValidator.js').TaskDefinition[]} tasks
  */
 export function sortTasks(tasks) {
   return [...tasks].sort((a, b) => {
-    const sectionDelta = SECTION_ORDER.indexOf(a.section) - SECTION_ORDER.indexOf(b.section);
-    if (sectionDelta !== 0) return sectionDelta;
+    const blockDelta = BLOCK_IDS.indexOf(a.sectionId) - BLOCK_IDS.indexOf(b.sectionId);
+    if (blockDelta !== 0) return blockDelta;
     if (a.order !== b.order) return a.order - b.order;
+    const timeDelta = startMinutes(a) - startMinutes(b);
+    if (timeDelta !== 0) return timeDelta;
     return a.createdAt < b.createdAt ? -1 : 1;
   });
+}
+
+/** Hora de referencia en minutos; las tareas sin hora van al final del bloque. */
+function startMinutes(task) {
+  try {
+    return task.timeStart ? parseTime(task.timeStart) : Number.MAX_SAFE_INTEGER;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
 }
 
 function safeRemoveLegacy() {

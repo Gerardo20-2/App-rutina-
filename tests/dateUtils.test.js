@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   toDateKey, fromDateKey, isDateKey, addDays, diffDays, rangeDays,
-  msUntilNextMidnight, weekdayIndex, currentSection,
+  msUntilNextMidnight, weekdayIndex, dayOfWeek,
+  parseTime, isTime, formatMinutes, normalizeRange, minutesOfDay,
 } from '../src/core/dateUtils.js';
 
 test('toDateKey usa el calendario local, no UTC', () => {
@@ -48,10 +49,42 @@ test('weekdayIndex trata el lunes como 0', () => {
   assert.equal(weekdayIndex('2026-09-27'), 6); // domingo
 });
 
-test('currentSection reparte la jornada en tres bloques', () => {
-  assert.equal(currentSection(new Date(2026, 8, 21, 8)), 'morning');
-  assert.equal(currentSection(new Date(2026, 8, 21, 15)), 'afternoon');
-  assert.equal(currentSection(new Date(2026, 8, 21, 22)), 'evening');
+test('dayOfWeek usa la numeración de getDay()', () => {
+  assert.equal(dayOfWeek('2026-09-20'), 0, 'domingo');
+  assert.equal(dayOfWeek('2026-09-21'), 1, 'lunes');
+  assert.equal(dayOfWeek('2026-09-22'), 2, 'martes');
+  assert.equal(dayOfWeek('2026-09-26'), 6, 'sábado');
+  assert.equal(dayOfWeek(new Date(2026, 8, 25)), 5, 'viernes');
+});
+
+test('parseTime convierte HH:mm en minutos y rechaza lo demás', () => {
+  assert.equal(parseTime('00:00'), 0);
+  assert.equal(parseTime('04:30'), 270);
+  assert.equal(parseTime('23:59'), 1439);
+  assert.ok(isTime('09:05'));
+  assert.ok(!isTime('9:05'));
+  assert.ok(!isTime('25:00'));
+  assert.ok(!isTime('12:60'));
+  assert.ok(!isTime(830));
+  assert.throws(() => parseTime('mediodía'), TypeError);
+});
+
+test('formatMinutes es inverso de parseTime', () => {
+  for (const time of ['00:00', '04:30', '14:00', '20:30', '23:59']) {
+    assert.equal(formatMinutes(parseTime(time)), time);
+  }
+  assert.equal(formatMinutes(1440), '24:00');
+});
+
+test('normalizeRange trata el fin 00:00 como final del día', () => {
+  assert.deepEqual(normalizeRange('23:00', '00:00'), { start: 1380, end: 1440 });
+  assert.deepEqual(normalizeRange('09:00', '14:00'), { start: 540, end: 840 });
+  assert.deepEqual(normalizeRange('21:30', '00:00'), { start: 1290, end: 1440 });
+});
+
+test('minutesOfDay cuenta desde la medianoche local', () => {
+  assert.equal(minutesOfDay(new Date(2026, 8, 21, 0, 0)), 0);
+  assert.equal(minutesOfDay(new Date(2026, 8, 21, 17, 45)), 1065);
 });
 
 test('fromDateKey devuelve medianoche local', () => {

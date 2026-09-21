@@ -17,6 +17,7 @@ import { toDateKey } from './dateUtils.js';
  * @property {boolean} ready            Hidratación completada.
  * @property {string} today             Clave `YYYY-MM-DD` del día activo.
  * @property {import('../domain/taskValidator.js').TaskDefinition[]} tasks Tareas activas ordenadas.
+ * @property {import('../domain/timeBlockService.js').ResolvedBlock[]} schedule Agenda del día en curso.
  * @property {import('../domain/taskValidator.js').DailyLog} log           Log del día activo.
  * @property {import('../domain/streakCalculator.js').StreakState} streak  Estado de racha.
  * @property {Object} preferences       Preferencias de usuario.
@@ -26,6 +27,7 @@ import { toDateKey } from './dateUtils.js';
  *   persistence: 'indexeddb'|'localstorage'|'memory',
  *   collapsedSections: string[],
  *   clockDesynced: boolean,
+ *   activeBlockId: string|null,
  * }} ui
  */
 
@@ -36,6 +38,7 @@ export function createInitialState() {
     ready: false,
     today,
     tasks: [],
+    schedule: [],
     log: {
       date: today,
       entries: {},
@@ -56,6 +59,8 @@ export function createInitialState() {
       // El reloj del dispositivo retrocedió respecto al último día evaluado:
       // el cálculo diario queda congelado hasta que vuelva a ser coherente.
       clockDesynced: false,
+      // Bloque horario en curso, recalculado por el vigilante temporal.
+      activeBlockId: null,
     },
   };
 }
