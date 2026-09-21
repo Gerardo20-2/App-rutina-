@@ -5,17 +5,22 @@
  * así que la integridad del esquema es responsabilidad del dominio.
  */
 
-import { SECTIONS, SECTION_ORDER, LIMITS, STREAK_CONFIG } from '../core/constants.js';
-import { isDateKey, toDateKey } from '../core/dateUtils.js';
+import { LIMITS, STREAK_CONFIG } from '../core/constants.js';
+import { isDateKey, toDateKey, isTime, normalizeRange } from '../core/dateUtils.js';
+import { isBlockId, getBlock, FALLBACK_BLOCK_ID } from './timeBlockService.js';
 
 /**
  * @typedef {Object} TaskDefinition
- * @property {string} id               Identificador único UUID v4.
+ * @property {string} id               Identificador único: UUID v4 o slug estable.
  * @property {string} title            Nombre legible (máx. 80 caracteres).
- * @property {'morning'|'afternoon'|'evening'|'anytime'} section Bloque del día.
- * @property {number} order            Posición ordinal para ordenamiento manual.
- * @property {number} estimatedMinutes Duración estimada en minutos.
+ * @property {string} sectionId        Identificador del bloque horario.
+ * @property {number[]} daysOfWeek     Días activos (0 = domingo … 6 = sábado). Vacío = todos.
+ * @property {string} [timeStart]      Hora de referencia "HH:mm".
+ * @property {string} [timeEnd]        Hora de fin "HH:mm".
+ * @property {boolean} isAnchor        Bloque rígido (trabajo, clase, traslado).
+ * @property {number} order            Posición ordinal dentro del bloque.
  * @property {boolean} isArchived      Flag de soft-delete.
+ * @property {number} estimatedMinutes Duración estimada; se deduce del rango si falta.
  * @property {string} createdAt        Timestamp ISO 8601.
  */
 
@@ -38,6 +43,20 @@ import { isDateKey, toDateKey } from '../core/dateUtils.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+/** Identificador legible y estable, p. ej. `task-tue-class`. */
+const SLUG_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/;
+
+/**
+ * Bloques genéricos de la v2, previos a la agenda por día. Sus tareas se
+ * recogen en el cajón sin horario: cualquier otro destino les inventaría un
+ * horario que el usuario nunca declaró.
+ */
+const LEGACY_SECTIONS = Object.freeze({
+  morning: FALLBACK_BLOCK_ID,
+  afternoon: FALLBACK_BLOCK_ID,
+  evening: FALLBACK_BLOCK_ID,
+  anytime: FALLBACK_BLOCK_ID,
+});
 
 /** Error de validación con detalle por campo. */
 export class ValidationError extends Error {
@@ -76,6 +95,39 @@ export function isUuid(value) {
   return typeof value === 'string' && UUID_RE.test(value);
 }
 
+/**
+ * Identificador de tarea admisible: UUID v4 (tareas creadas por el usuario) o
+ * slug estable (semilla precargada).
+ * @param {string} value
+ */
+export function isTaskId(value) {
+  return isUuid(value) || (typeof value === 'string' && SLUG_RE.test(value));
+}
+
+/**
+ * Normaliza `daysOfWeek`: enteros 0–6, sin duplicados y ordenados. Un array
+ * con los siete días equivale a «todos», que se representa con el vacío.
+ * @param {*} value
+ * @returns {{days: number[], invalid: boolean}}
+ */
+export function normalizeDaysOfWeek(value) {
+  if (value === undefined || value === null) return { days: [], invalid: false };
+  if (!Array.isArray(value)) return { days: [], invalid: true };
+
+  const days = [];
+  let invalid = false;
+  for (const entry of value) {
+    const day = Number(entry);
+    if (!Number.isInteger(day) || day < 0 || day > 6) {
+      invalid = true;
+      continue;
+    }
+    if (!days.includes(day)) days.push(day);
+  }
+  days.sort((a, b) => a - b);
+  return { days: days.length === 7 ? [] : days, invalid };
+}
+
 /** @param {string} value */
 export function isIsoTimestamp(value) {
   return typeof value === 'string' && ISO_RE.test(value) && !Number.isNaN(Date.parse(value));
@@ -96,7 +148,7 @@ export function validateTask(input, options = {}) {
   }
 
   const id = input.id ?? (options.partial ? uuid() : undefined);
-  if (!isUuid(id)) issues.push({ field: 'id', message: 'se esperaba un UUID v4' });
+  if (!isTaskId(id)) issues.push({ field: 'id', message: 'se esperaba un UUID v4 o un identificador estable' });
 
   const title = typeof input.title === 'string' ? input.title.trim().replace(/\s+/g, ' ') : '';
   if (title.length === 0) {
@@ -105,19 +157,29 @@ export function validateTask(input, options = {}) {
     issues.push({ field: 'title', message: `máximo ${LIMITS.TASK_TITLE_MAX} caracteres` });
   }
 
-  const section = input.section ?? SECTIONS.ANYTIME;
-  if (!SECTION_ORDER.includes(section)) {
-    issues.push({ field: 'section', message: `debe ser uno de: ${SECTION_ORDER.join(', ')}` });
+  // `section` es el campo de la v2: se acepta como alias para que un backup
+  // antiguo o un registro sin migrar sigan siendo legibles.
+  const rawSection = input.sectionId ?? LEGACY_SECTIONS[input.section] ?? input.section;
+  const sectionId = rawSection ?? FALLBACK_BLOCK_ID;
+  if (!isBlockId(sectionId)) {
+    issues.push({ field: 'sectionId', message: `bloque desconocido: ${String(rawSection)}` });
+  }
+
+  const { days, invalid: badDays } = normalizeDaysOfWeek(input.daysOfWeek);
+  if (badDays) issues.push({ field: 'daysOfWeek', message: 'se esperaban enteros de 0 (domingo) a 6 (sábado)' });
+
+  const timeStart = input.timeStart ?? undefined;
+  if (timeStart !== undefined && !isTime(timeStart)) {
+    issues.push({ field: 'timeStart', message: 'se esperaba HH:mm' });
+  }
+  const timeEnd = input.timeEnd ?? undefined;
+  if (timeEnd !== undefined && !isTime(timeEnd)) {
+    issues.push({ field: 'timeEnd', message: 'se esperaba HH:mm' });
   }
 
   const order = Number(input.order ?? 0);
   if (!Number.isFinite(order) || order < 0) {
     issues.push({ field: 'order', message: 'debe ser un número finito >= 0' });
-  }
-
-  const estimatedMinutes = Number(input.estimatedMinutes ?? 5);
-  if (!Number.isFinite(estimatedMinutes) || estimatedMinutes < 0 || estimatedMinutes > LIMITS.TASK_MINUTES_MAX) {
-    issues.push({ field: 'estimatedMinutes', message: `debe estar entre 0 y ${LIMITS.TASK_MINUTES_MAX}` });
   }
 
   const createdAt = input.createdAt ?? (options.partial ? new Date().toISOString() : undefined);
@@ -129,15 +191,39 @@ export function validateTask(input, options = {}) {
     throw new ValidationError(`Tarea inválida: ${issues.map((i) => `${i.field} (${i.message})`).join('; ')}`, issues);
   }
 
+  // Duración: la declarada, o la que se deduce del rango horario.
+  let estimatedMinutes = Number(input.estimatedMinutes);
+  if (!Number.isFinite(estimatedMinutes) || estimatedMinutes < 0) {
+    estimatedMinutes = timeStart && timeEnd ? spanMinutes(timeStart, timeEnd) : 5;
+  }
+  estimatedMinutes = Math.min(LIMITS.TASK_MINUTES_MAX, Math.round(estimatedMinutes));
+
   return {
     id,
     title,
-    section,
+    sectionId,
+    daysOfWeek: days,
+    ...(timeStart === undefined ? {} : { timeStart }),
+    ...(timeEnd === undefined ? {} : { timeEnd }),
+    // Por defecto, una tarea es rígida si su bloque lo es: las tareas de
+    // trabajo, clase o traslado no se negocian.
+    isAnchor: input.isAnchor === undefined ? Boolean(getBlock(sectionId)?.isAnchor) : Boolean(input.isAnchor),
     order: Math.trunc(order),
-    estimatedMinutes: Math.round(estimatedMinutes),
+    estimatedMinutes,
     isArchived: Boolean(input.isArchived),
     createdAt,
   };
+}
+
+/**
+ * Duración de un rango horario en minutos, tratando "00:00" como fin del día.
+ * @param {string} start
+ * @param {string} end
+ * @returns {number}
+ */
+function spanMinutes(start, end) {
+  const range = normalizeRange(start, end);
+  return range.end - range.start;
 }
 
 /**
@@ -187,8 +273,8 @@ export function validateDailyLog(input) {
   const entries = {};
   const rawEntries = input.entries && typeof input.entries === 'object' ? input.entries : {};
   for (const [taskId, record] of Object.entries(rawEntries)) {
-    if (!isUuid(taskId)) {
-      issues.push({ field: `entries.${taskId}`, message: 'clave no es un UUID v4' });
+    if (!isTaskId(taskId)) {
+      issues.push({ field: `entries.${taskId}`, message: 'clave no es un identificador de tarea válido' });
       continue;
     }
     entries[taskId] = createExecutionRecord(record ?? {});

@@ -201,13 +201,22 @@ export function nextConsistencyScore(previous, rate, config = STREAK_CONFIG, opt
  * @param {StreakState} state
  * @param {Object.<string, {date:string,totalActiveTasks:number,completedCount:number,completionRate:number,entries?:Object}>} logsByDate
  * @param {string} throughDate   Día activo (no se evalúa: aún está abierto).
- * @param {{defaultActiveTasks?: number, config?: typeof STREAK_CONFIG}} [options]
+ * @param {{
+ *   defaultActiveTasks?: number,
+ *   activeTasksFor?: (date: string) => number,
+ *   config?: typeof STREAK_CONFIG,
+ * }} [options]
+ *   `activeTasksFor` permite que el divisor dependa del día: con una agenda
+ *   semanal, un sábado sin tareas no es lo mismo que un martes con ocho.
  * @returns {{state: StreakState, evaluations: DayEvaluation[], truncated: boolean}}
  */
 export function reconcile(state, logsByDate, throughDate, options = {}) {
   assertDateKey(throughDate);
   const config = options.config ?? STREAK_CONFIG;
-  const defaultActiveTasks = Math.max(0, Math.trunc(options.defaultActiveTasks ?? 0));
+  const fallbackActiveTasks = Math.max(0, Math.trunc(options.defaultActiveTasks ?? 0));
+  const activeTasksFor = typeof options.activeTasksFor === 'function'
+    ? (date) => Math.max(0, Math.trunc(options.activeTasksFor(date)))
+    : () => fallbackActiveTasks;
 
   let working = { ...state };
   /** @type {DayEvaluation[]} */
@@ -234,7 +243,7 @@ export function reconcile(state, logsByDate, throughDate, options = {}) {
     const log = logsByDate[cursor] ?? {
       date: cursor,
       entries: {},
-      totalActiveTasks: defaultActiveTasks,
+      totalActiveTasks: activeTasksFor(cursor),
       completedCount: 0,
       completionRate: 0,
     };

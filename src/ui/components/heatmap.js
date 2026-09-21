@@ -30,14 +30,14 @@ export function createHeatmap() {
     h('span', { text: 'Más' }),
   ]);
 
-  const el = h('section', { class: 'heatmap card', 'aria-labelledby': 'heatmap-title' }, [
-    h('div', { class: 'card__head' }, [
-      h('h2', { class: 'card__title', id: 'heatmap-title', text: 'Consistencia' }),
-      h('span', { class: 'card__hint', text: `${WEEKS} semanas` }),
-    ]),
-    canvas,
+  const stats = h('dl', { class: 'heatmap__stats' });
+
+  const el = h('div', { class: 'heatmap' }, [
+    h('p', { class: 'heatmap__hint', text: `Últimas ${WEEKS} semanas · toca un día para ver el detalle` }),
+    h('div', { class: 'heatmap__scroller' }, [canvas]),
     legend,
     detail,
+    stats,
     summary,
   ]);
 
@@ -54,11 +54,30 @@ export function createHeatmap() {
     const active = days.filter((d) => d && d.totalActiveTasks > 0);
     const perfect = active.filter((d) => d.completionRate >= 1).length;
     summary.textContent = `Historial de ${active.length} días registrados, ${perfect} completados al 100 %.`;
+
+    const average = active.length === 0
+      ? 0
+      : Math.round((active.reduce((sum, d) => sum + d.completionRate, 0) / active.length) * 100);
+    stats.replaceChildren(
+      statItem('Racha actual', `${state.streak.currentStreak} d`),
+      statItem('Mejor racha', `${state.streak.bestStreak} d`),
+      statItem('Días al 100 %', String(perfect)),
+      statItem('Media', `${average} %`),
+    );
+  }
+
+  function statItem(label, value) {
+    return h('div', { class: 'heatmap__stat' }, [
+      h('dt', { text: label }),
+      h('dd', { text: value }),
+    ]);
   }
 
   function draw() {
     if (!lastState) return;
     const width = el.clientWidth || canvas.clientWidth || 320;
+    // Se dibuja siempre la rejilla completa; si no cabe, el contenedor hace
+    // scroll horizontal en lugar de encoger las celdas por debajo de lo legible.
     if (width <= 0) return;
 
     const dpr = Math.min(3, globalThis.devicePixelRatio || 1);

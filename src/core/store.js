@@ -17,11 +17,18 @@ import { toDateKey } from './dateUtils.js';
  * @property {boolean} ready            Hidratación completada.
  * @property {string} today             Clave `YYYY-MM-DD` del día activo.
  * @property {import('../domain/taskValidator.js').TaskDefinition[]} tasks Tareas activas ordenadas.
+ * @property {import('../domain/timeBlockService.js').ResolvedBlock[]} schedule Agenda del día en curso.
  * @property {import('../domain/taskValidator.js').DailyLog} log           Log del día activo.
  * @property {import('../domain/streakCalculator.js').StreakState} streak  Estado de racha.
  * @property {Object} preferences       Preferencias de usuario.
  * @property {Object.<string, {completionRate:number, completedCount:number, totalActiveTasks:number}>} history Resumen para el heatmap.
- * @property {{editingTaskId: string|null, editorOpen: boolean, busy: boolean, persistence: 'indexeddb'|'localstorage'|'memory'}} ui
+ * @property {{
+ *   busy: boolean,
+ *   persistence: 'indexeddb'|'localstorage'|'memory',
+ *   collapsedSections: string[],
+ *   clockDesynced: boolean,
+ *   activeBlockId: string|null,
+ * }} ui
  */
 
 /** @returns {AppState} */
@@ -31,6 +38,7 @@ export function createInitialState() {
     ready: false,
     today,
     tasks: [],
+    schedule: [],
     log: {
       date: today,
       entries: {},
@@ -43,10 +51,16 @@ export function createInitialState() {
     preferences: { ...DEFAULT_PREFERENCES },
     history: {},
     ui: {
-      editingTaskId: null,
-      editorOpen: false,
       busy: false,
       persistence: 'memory',
+      // Bloques del día plegados. Se calcula en la hidratación: abierto el de
+      // la hora actual, plegados los demás.
+      collapsedSections: [],
+      // El reloj del dispositivo retrocedió respecto al último día evaluado:
+      // el cálculo diario queda congelado hasta que vuelva a ser coherente.
+      clockDesynced: false,
+      // Bloque horario en curso, recalculado por el vigilante temporal.
+      activeBlockId: null,
     },
   };
 }

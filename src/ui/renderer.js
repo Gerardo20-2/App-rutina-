@@ -6,6 +6,13 @@
  * del {@link RoutineService} y reparte el estado a los componentes. Cada
  * componente decide qué parte redibuja, y el reparto se hace en un
  * `requestAnimationFrame` para agrupar mutaciones dentro de un mismo frame.
+ *
+ * ## Reparto de la pantalla (zona del pulgar)
+ *
+ *   arriba   `header`     lectura pasiva: fecha, racha, anillo de progreso
+ *   centro   `taskList`   la rutina, con bloques plegables
+ *   abajo    `bottomBar`  todas las acciones: añadir, histórico, ajustes
+ *   overlay  hojas        editor, histórico y ajustes, siempre desde abajo
  */
 
 import { h } from './dom.js';
@@ -14,9 +21,11 @@ import { createTaskList } from './components/taskList.js';
 import { createHeatmap } from './components/heatmap.js';
 import { createTaskEditor } from './components/taskEditor.js';
 import { createSettingsPanel } from './components/settingsPanel.js';
+import { createBottomSheet } from './components/bottomSheet.js';
+import { createBottomBar } from './components/bottomBar.js';
 import { createToaster } from './components/toast.js';
-import { EVENTS } from '../core/constants.js';
-import { currentSection } from '../core/dateUtils.js';
+import { EVENTS, STREAK_TRANSITION } from '../core/constants.js';
+import { TimeBlockWatcher, FALLBACK_BLOCK_ID } from '../domain/timeBlockService.js';
 
 /**
  * @param {{
@@ -49,13 +58,16 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
     onToggle: (id) => void run(() => service.toggleTask(id)),
     onSkip: (id) => void run(() => service.skipTask(id)),
     onEdit: (id) => {
-      const task = store.getState().tasks.find((t) => t.id === id);
-      if (task) editor.open(task);
+      const task = store.getState().tasks.find((candidate) => candidate.id === id);
+      if (task) editor.open(task, task.sectionId);
     },
-    onCreate: () => editor.open(null, currentSection()),
+    onCreate: () => editor.open(null, defaultBlock()),
+    onToggleSection: (section) => service.toggleSection(section),
   });
 
   const heatmap = createHeatmap();
+  const historySheet = createBottomSheet({ id: 'sheet-history', title: 'Histórico' });
+  historySheet.setContent(heatmap.el);
 
   const settings = createSettingsPanel({
     capabilities: { haptics: haptics.supported, wakeLock: wakeLock.supported },
@@ -69,33 +81,60 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
       if (!confirm('Se borrarán todas las tareas y el historial. Esta acción no se puede deshacer.')) return;
       void run(async () => {
         await service.wipe();
+        settingsSheet.close();
         bus.emit(EVENTS.TOAST, { message: 'Datos borrados', tone: 'info' });
       });
     },
   });
+  const settingsSheet = createBottomSheet({ id: 'sheet-settings', title: 'Ajustes' });
+  settingsSheet.setContent(settings.el);
 
-  const fab = h('button', {
-    class: 'fab', type: 'button', 'aria-label': 'Añadir tarea',
-    onClick: () => {
-      haptics.fire('TAP');
-      editor.open(null, currentSection());
+  const bottomBar = createBottomBar({
+    haptics,
+    onCreate: (trigger) => editor.open(null, defaultBlock(), trigger),
+    onHistory: (trigger) => {
+      historySheet.open(trigger);
+      // El canvas se dimensiona contra su contenedor: dentro de una hoja aún
+      // sin pintar mediría 0, así que se redibuja una vez abierta.
+      requestAnimationFrame(() => heatmap.redraw());
     },
-  }, [h('span', { 'aria-hidden': 'true', text: '+' })]);
+    onSettings: (trigger) => settingsSheet.open(trigger),
+  });
 
   const app = h('div', { class: 'app' }, [
     header.el,
     taskList.el,
-    h('div', { class: 'app__panels' }, [heatmap.el, settings.el]),
     h('footer', { class: 'app__footer' }, [
       h('p', { text: 'Tus datos nunca salen de este dispositivo.' }),
     ]),
   ]);
 
-  const components = [header, taskList, heatmap, settings];
+  const components = [header, taskList, heatmap, settings, bottomBar];
   let frame = null;
 
+  /**
+   * Vigila el paso de un bloque horario al siguiente y refresca la agenda sin
+   * recargar la página: al dar las 19:00 de un martes, «Clase» pasa a estar en
+   * curso y se despliega sola.
+   */
+  let firstBlockResolution = true;
+  const blockWatcher = new TimeBlockWatcher({
+    onChange: ({ blockId }) => {
+      service.refreshTimeContext();
+      // La primera resolución no es una transición: es el estado con el que
+      // arranca la aplicación, y vibrar al abrirla sería ruido.
+      if (!firstBlockResolution && blockId !== null) haptics.fire('TAP');
+      firstBlockResolution = false;
+    },
+  });
+
+  /** Bloque sugerido al crear una tarea: el que está en curso. */
+  function defaultBlock() {
+    return store.getState().ui.activeBlockId ?? FALLBACK_BLOCK_ID;
+  }
+
   function mount() {
-    root.replaceChildren(app, fab, editor.el, toaster.el);
+    root.replaceChildren(app, bottomBar.el, editor.el, historySheet.el, settingsSheet.el, toaster.el);
     applyPreferences(store.getState().preferences);
     render(store.getState());
 
@@ -103,17 +142,19 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
     // desde el menú contextual del icono, y limpia la URL para que un
     // refresco no lo reabra.
     if (new URLSearchParams(location.search).get('action') === 'new-task') {
-      editor.open(null, currentSection());
+      editor.open(null, defaultBlock());
       history.replaceState(null, '', location.pathname);
     }
+
+    blockWatcher.start();
 
     // Una sola suscripción: la identidad del estado cambia con cada mutación,
     // así que el selector identidad basta y evita N suscripciones activas.
     const unsubscribe = store.subscribe((state) => state, scheduleRender);
 
     const offDayRolled = bus.on(EVENTS.DAY_ROLLED, ({ evaluations }) => {
-      const broken = evaluations.find((e) => e.transition === 'BROKEN');
-      const shielded = evaluations.find((e) => e.shieldConsumed);
+      const broken = evaluations.find((item) => item.transition === STREAK_TRANSITION.BROKEN);
+      const shielded = evaluations.find((item) => item.shieldConsumed);
       if (shielded) {
         bus.emit(EVENTS.TOAST, { message: '🛡️ Un escudo salvó tu racha', tone: 'info', timeout: 5000 });
       } else if (broken) {
@@ -125,12 +166,21 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
 
     const offToggled = bus.on(EVENTS.TASK_TOGGLED, ({ completed, log }) => {
       if (!completed) return;
-      const done = log.completedCount;
-      const total = Math.max(0, log.totalActiveTasks - Object.values(log.entries).filter((e) => e.skipped).length);
-      if (total > 0 && done === total) {
+      const skipped = Object.values(log.entries).filter((entry) => entry.skipped).length;
+      const computable = Math.max(0, log.totalActiveTasks - skipped);
+      if (computable > 0 && log.completedCount === computable) {
         haptics.fire('STREAK_UP');
         bus.emit(EVENTS.TOAST, { message: '🎉 Rutina completa. ¡Bien hecho!', tone: 'success' });
       }
+    });
+
+    const offClock = bus.on(EVENTS.CLOCK_DESYNC, ({ frozen }) => {
+      if (!frozen) return;
+      bus.emit(EVENTS.TOAST, {
+        message: 'Reloj desincronizado: el cierre del día está en pausa',
+        tone: 'error',
+        timeout: 8000,
+      });
     });
 
     const offError = bus.on(EVENTS.ERROR, ({ error }) => {
@@ -138,14 +188,18 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
     });
 
     return () => {
+      blockWatcher.stop();
       unsubscribe();
       offDayRolled();
       offToggled();
+      offClock();
       offError();
       if (frame !== null) cancelAnimationFrame(frame);
       for (const component of components) component.destroy();
-      toaster.destroy();
       editor.destroy();
+      historySheet.destroy();
+      settingsSheet.destroy();
+      toaster.destroy();
     };
   }
 
@@ -167,9 +221,9 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
   function applyPreferences(preferences) {
     haptics.setEnabled(preferences.hapticsEnabled);
     void wakeLock.toggle(Boolean(preferences.wakeLockEnabled));
-    const root = document.documentElement;
-    if (preferences.theme === 'system') delete root.dataset.theme;
-    else root.dataset.theme = preferences.theme;
+    const documentRoot = document.documentElement;
+    if (preferences.theme === 'system') delete documentRoot.dataset.theme;
+    else documentRoot.dataset.theme = preferences.theme;
   }
 
   async function exportBackup() {
@@ -189,6 +243,7 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
   async function importBackup(file) {
     const text = await file.text();
     const result = await service.importBackup(text);
+    settingsSheet.close();
     bus.emit(EVENTS.TOAST, {
       message: `Importado: ${result.tasks} tareas y ${result.logs} días`,
       tone: 'success',

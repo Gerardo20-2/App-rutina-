@@ -9,6 +9,7 @@ import { Store, createInitialState } from '../src/core/store.js';
 import { EventBus } from '../src/core/events.js';
 import { RESET_STATE, EVENTS } from '../src/core/constants.js';
 import { toDateKey, fromDateKey, addDays } from '../src/core/dateUtils.js';
+import { tasksForDay, countTasksForDay } from '../src/domain/timeBlockService.js';
 
 /** Reloj controlable: devuelve el mediodía de la clave de día indicada. */
 function clockAt(dateKey) {
@@ -41,7 +42,7 @@ test('el corte de medianoche cierra el día y extiende la racha', async () => {
   const day0 = store.getState().today;
   const day1 = addDays(day0, 1);
 
-  for (const task of store.getState().tasks) await service.toggleTask(task.id);
+  for (const task of tasksForDay(store.getState().tasks, day0)) await service.toggleTask(task.id);
   assert.equal(store.getState().log.completionRate, 1);
 
   const rolled = [];
@@ -58,7 +59,8 @@ test('el corte de medianoche cierra el día y extiende la racha', async () => {
 
   const closed = await repository.getLog(day0);
   assert.equal(closed.closed, true, 'el día anterior queda cerrado');
-  assert.equal(closed.completedCount, store.getState().log.totalActiveTasks);
+  assert.equal(closed.completedCount, countTasksForDay(store.getState().tasks, day0),
+    'se cerró con las tareas que aplicaban ese día, no con el total');
 
   assert.equal(rolled.length, 1);
   assert.equal(rolled[0].from, day0);
@@ -69,7 +71,12 @@ test('el corte de medianoche cierra el día y extiende la racha', async () => {
 test('un día flojo rompe la racha al cerrarse', async () => {
   const { repository, store, bus } = await makeApp();
   const day0 = store.getState().today;
-  await repository.saveStreak({ ...(await repository.getStreak()), currentStreak: 6, bestStreak: 6, lastEvaluatedDate: addDays(day0, -1) });
+  store.setState({
+    streak: await repository.saveStreak({
+      ...(await repository.getStreak()),
+      currentStreak: 6, bestStreak: 6, lastEvaluatedDate: addDays(day0, -1),
+    }),
+  });
 
   const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, 1)) });
   await reset.check('test');
@@ -82,9 +89,11 @@ test('un día flojo rompe la racha al cerrarse', async () => {
 test('un escudo absorbe el día perdido y se avisa por el bus', async () => {
   const { repository, store, bus } = await makeApp();
   const day0 = store.getState().today;
-  await repository.saveStreak({
-    currentStreak: 10, bestStreak: 10, shieldsAvailable: 1, shieldsUsedTotal: 0,
-    weightedConsistencyScore: 80, lastEvaluatedDate: addDays(day0, -1),
+  store.setState({
+    streak: await repository.saveStreak({
+      currentStreak: 10, bestStreak: 10, shieldsAvailable: 1, shieldsUsedTotal: 0,
+      weightedConsistencyScore: 80, lastEvaluatedDate: addDays(day0, -1),
+    }),
   });
 
   const shielded = [];
@@ -102,9 +111,11 @@ test('un escudo absorbe el día perdido y se avisa por el bus', async () => {
 test('una ausencia de varios días se reconcilia en un solo arranque', async () => {
   const { repository, store, bus } = await makeApp();
   const day0 = store.getState().today;
-  await repository.saveStreak({
-    currentStreak: 3, bestStreak: 5, shieldsAvailable: 1, shieldsUsedTotal: 0,
-    weightedConsistencyScore: 70, lastEvaluatedDate: addDays(day0, -1),
+  store.setState({
+    streak: await repository.saveStreak({
+      currentStreak: 3, bestStreak: 5, shieldsAvailable: 1, shieldsUsedTotal: 0,
+      weightedConsistencyScore: 70, lastEvaluatedDate: addDays(day0, -1),
+    }),
   });
 
   const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, 4)) });
@@ -122,7 +133,7 @@ test('una ausencia de varios días se reconcilia en un solo arranque', async () 
 test('check() es idempotente: dos llamadas no evalúan el día dos veces', async () => {
   const { repository, store, bus, service } = await makeApp();
   const day0 = store.getState().today;
-  for (const task of store.getState().tasks) await service.toggleTask(task.id);
+  for (const task of tasksForDay(store.getState().tasks, day0)) await service.toggleTask(task.id);
 
   const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, 1)) });
   await reset.check('first');
@@ -131,26 +142,103 @@ test('check() es idempotente: dos llamadas no evalúan el día dos veces', async
   assert.equal(store.getState().streak.currentStreak, 1, 'la racha no se duplica');
 });
 
-test('un salto de reloj hacia atrás no reevalúa el pasado', async () => {
-  const { repository, store, bus } = await makeApp();
+/**
+ * Deja el estado de racha sincronizado en almacenamiento y en el store, que es
+ * como queda tras una hidratación real.
+ */
+async function setStreak(repository, store, patch) {
+  const streak = await repository.saveStreak({
+    currentStreak: 0, bestStreak: 0, shieldsAvailable: 0, shieldsUsedTotal: 0,
+    weightedConsistencyScore: 0, lastEvaluatedDate: null, ...patch,
+  });
+  store.setState({ streak });
+  return streak;
+}
+
+test('un reloj por detrás del último día evaluado congela el cálculo diario', async () => {
+  const { repository, store, bus, service } = await makeApp();
   const day0 = store.getState().today;
-  await repository.saveStreak({
-    currentStreak: 8, bestStreak: 8, shieldsAvailable: 2, shieldsUsedTotal: 0,
+  await setStreak(repository, store, {
+    currentStreak: 8, bestStreak: 8, shieldsAvailable: 2,
     weightedConsistencyScore: 90, lastEvaluatedDate: addDays(day0, -1),
   });
+  const logBefore = await repository.getLog(day0);
 
+  const events = [];
+  bus.on(EVENTS.CLOCK_DESYNC, (payload) => events.push(payload));
+
+  // El dispositivo retrocede tres días (viaje de husos, NTP o reloj a mano).
   const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, -3)) });
+  assert.equal(await reset.check('clock-skew'), false, 'no hay corte de día');
+
+  const state = store.getState();
+  assert.equal(state.today, day0, 'el día activo no retrocede');
+  assert.equal(state.streak.currentStreak, 8, 'la racha se mantiene intacta');
+  assert.equal(state.streak.shieldsAvailable, 2, 'no se consumen escudos');
+  assert.equal(state.ui.clockDesynced, true);
+  assert.equal(reset.state, RESET_STATE.FROZEN);
+  assert.deepEqual(await repository.getLog(day0), logBefore, 'los logs no se tocan');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].frozen, true);
+
+  // Mientras está congelado, marcar tareas sigue funcionando.
+  const [task] = tasksForDay(state.tasks, state.today);
+  await service.toggleTask(task.id);
+  assert.equal(store.getState().log.completedCount, 1);
+
+  // Y el aviso no se repite en cada comprobación.
+  await reset.check('tick');
+  assert.equal(events.length, 1, 'el aviso se emite una sola vez por episodio');
+});
+
+test('el cálculo se reanuda cuando el reloj vuelve a ser coherente', async () => {
+  const { repository, store, bus } = await makeApp();
+  const day0 = store.getState().today;
+  await setStreak(repository, store, {
+    currentStreak: 5, bestStreak: 5, lastEvaluatedDate: addDays(day0, -1),
+  });
+
+  const events = [];
+  bus.on(EVENTS.CLOCK_DESYNC, (payload) => events.push(payload));
+
+  const frozen = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, -2)) });
+  await frozen.check('clock-skew');
+  assert.equal(store.getState().ui.clockDesynced, true);
+
+  // El reloj se corrige y avanza al día siguiente: el corte se ejecuta ya.
+  const recovered = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, 1)) });
+  assert.equal(await recovered.check('resync'), true);
+
+  const state = store.getState();
+  assert.equal(state.ui.clockDesynced, false, 'se descongela');
+  assert.equal(state.today, addDays(day0, 1), 'el día avanza');
+  assert.equal(state.streak.lastEvaluatedDate, day0, 'el día pendiente se evalúa');
+  assert.deepEqual(events.map((event) => event.frozen), [true, false]);
+});
+
+test('un retroceso dentro del rango ya evaluado sólo reapunta el día activo', async () => {
+  const { repository, store, bus } = await makeApp();
+  const day0 = store.getState().today;
+  await setStreak(repository, store, {
+    currentStreak: 8, bestStreak: 8, shieldsAvailable: 2, lastEvaluatedDate: addDays(day0, -1),
+  });
+
+  // Hoy pasa a ser el último día evaluado: no es anterior, así que no congela,
+  // pero tampoco debe reevaluarse nada hacia atrás.
+  const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, -1)) });
   await reset.check('clock-skew');
 
-  assert.equal(store.getState().today, addDays(day0, -3));
-  assert.equal(store.getState().streak.currentStreak, 8, 'la racha se mantiene intacta');
-  assert.equal(store.getState().streak.shieldsAvailable, 2, 'no se consumen escudos');
+  const state = store.getState();
+  assert.equal(state.today, addDays(day0, -1));
+  assert.equal(state.streak.currentStreak, 8, 'la racha se mantiene intacta');
+  assert.equal(state.streak.shieldsAvailable, 2, 'no se consumen escudos');
+  assert.equal(state.ui.clockDesynced, false);
 });
 
 test('el historial del heatmap se recarga tras el corte', async () => {
   const { repository, store, bus, service } = await makeApp();
   const day0 = store.getState().today;
-  for (const task of store.getState().tasks) await service.toggleTask(task.id);
+  for (const task of tasksForDay(store.getState().tasks, day0)) await service.toggleTask(task.id);
 
   const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, 1)) });
   await reset.check('test');
@@ -168,4 +256,23 @@ test('start() y stop() no dejan temporizadores activos', async () => {
   reset.stop();
   assert.equal(reset.state, RESET_STATE.IDLE);
   assert.equal(toDateKey(), store.getState().today);
+});
+
+test('cada día se evalúa con el divisor de su propia agenda', async () => {
+  const { repository, store, bus } = await makeApp();
+  const day0 = store.getState().today;
+  const tasks = store.getState().tasks;
+
+  await setStreak(repository, store, { currentStreak: 2, bestStreak: 2, lastEvaluatedDate: addDays(day0, -1) });
+
+  // Cuatro días sin abrir la app: cada uno se juzga por lo que le tocaba.
+  const reset = new DayResetService({ repository, store, bus, now: clockAt(addDays(day0, 4)) });
+  await reset.check('bootstrap');
+
+  const logs = await repository.listLogs(day0, addDays(day0, 3));
+  assert.ok(logs.length > 0);
+  for (const log of logs) {
+    assert.equal(log.totalActiveTasks, countTasksForDay(tasks, log.date),
+      `el divisor de ${log.date} debe salir de su agenda`);
+  }
 });

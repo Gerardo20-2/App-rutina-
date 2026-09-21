@@ -247,6 +247,13 @@ function applySchema(db, tx, oldVersion) {
     const objectStore = tx?.objectStore(storeName);
     if (!objectStore) continue;
     for (const [indexName, keyPath] of Object.entries(indices)) {
+      // El keyPath de un índice no se puede cambiar: en la v3, `idx_section`
+      // pasó de apuntar a `section` a apuntar a `sectionId`, así que hay que
+      // borrarlo y volver a crearlo dentro de la transacción de upgrade.
+      if (oldVersion > 0 && oldVersion < 3 && indexName === 'idx_section'
+        && objectStore.indexNames.contains(indexName)) {
+        objectStore.deleteIndex(indexName);
+      }
       if (!objectStore.indexNames.contains(indexName)) {
         // `isArchived` es booleano: IndexedDB no indexa booleanos, por eso el
         // repositorio persiste 0/1 en `archivedFlag` y el índice apunta ahí.
@@ -256,6 +263,10 @@ function applySchema(db, tx, oldVersion) {
       }
     }
   }
+
+  // v2 → v3 sólo cambia la forma de los registros de `tasks`, que se reescriben
+  // fuera de esta transacción (`repository.migrateSchema`): aquí no se puede
+  // validar con el dominio porque `onupgradeneeded` no admite promesas.
 
   if (oldVersion > 0 && oldVersion < 2) {
     // El store legado se conserva: `repository.migrateLegacy()` lo vacía tras

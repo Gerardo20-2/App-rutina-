@@ -26,6 +26,12 @@
   --c-danger-soft: #fbeceb;
   --c-warning: #b7791f;
 
+  /* Tripletas RGB: los fondos de swipe modulan su alfa en función del avance
+     del gesto, y para eso hace falta el color sin el canal alfa fijado. */
+  --c-accent-rgb: 47 125 89;
+  --c-warning-rgb: 183 121 31;
+  --c-scrim-rgb: 9 14 20;
+
   /* Heatmap (leído por canvas) */
   --heat-0: #e7ecf3;
   --heat-1: #d6e6dc;
@@ -54,8 +60,10 @@
   --shadow-sm: 0 1px 2px rgb(17 24 39 / 6%), 0 1px 3px rgb(17 24 39 / 4%);
   --shadow-md: 0 8px 24px rgb(17 24 39 / 10%);
 
-  /* Superficie táctil mínima recomendada */
-  --tap: 44px;
+  /* Objetivo táctil mínimo: 48 px (WCAG 2.2, criterio 2.5.8 AA). */
+  --tap: 48px;
+  /* Altura de la barra de acciones inferior, sin contar la safe area. */
+  --bar-height: 64px;
   --duration: 180ms;
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 
@@ -77,6 +85,10 @@
     --c-danger: #e3796c;
     --c-danger-soft: #2c1a18;
     --c-warning: #e0b567;
+
+    --c-accent-rgb: 76 192 138;
+    --c-warning-rgb: 224 181 103;
+    --c-scrim-rgb: 0 0 0;
 
     --heat-0: #1d2530;
     --heat-1: #214031;
@@ -105,6 +117,10 @@
   --c-danger-soft: #2c1a18;
   --c-warning: #e0b567;
 
+  --c-accent-rgb: 76 192 138;
+  --c-warning-rgb: 224 181 103;
+  --c-scrim-rgb: 0 0 0;
+
   --heat-0: #1d2530;
   --heat-1: #214031;
   --heat-2: #2f6a4c;
@@ -125,6 +141,14 @@
 html {
   -webkit-text-size-adjust: 100%;
   scroll-behavior: smooth;
+}
+
+/* Mientras hay una hoja abierta, el fondo no debe hacer scroll: en móvil el
+   gesto se "cuela" bajo la hoja y el usuario pierde el sitio de la lista. */
+html.has-sheet,
+html.has-sheet body {
+  overflow: hidden;
+  touch-action: none;
 }
 
 body {

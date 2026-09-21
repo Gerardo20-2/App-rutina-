@@ -1,13 +1,18 @@
 /**
- * components.css — botones, tarjetas, ítems de tarea, heatmap y transiciones.
+ * components.css — botones, barra inferior, hojas, ítems de tarea, heatmap y
+ * transiciones.
  *
- * El ítem de tarea usa dos capas: `.task__affordances` (fondo fijo con los
- * iconos de acción) y `.task__surface` (capa que sigue al dedo). Sólo se anima
- * `transform`, nunca `left`/`margin`, para que el gesto corra en el
- * compositor y no dispare layout en cada frame.
+ * Dos principios recorren el archivo:
+ *
+ *  1. **Objetivo táctil de 48 px** en todo lo que se pueda tocar. Donde el
+ *     elemento visible es menor (el círculo de completar mide 28 px), el área
+ *     se amplía con relleno o con un pseudoelemento, sin agrandar el dibujo.
+ *  2. **Sólo `transform` y `opacity` en lo que se anima.** El arrastre de una
+ *     fila o de una hoja corre en el compositor; nada de `left`, `top` ni
+ *     `height` en un gesto que sigue al dedo.
  */
 
-/* --- Botones --------------------------------------------------------- */
+/* --- Botones ---------------------------------------------------------- */
 
 .btn {
   display: inline-flex;
@@ -41,57 +46,153 @@
   border-color: transparent;
 }
 
+.btn--block {
+  width: 100%;
+}
+
+/* --- Barra de acciones inferior --------------------------------------- */
+
+.bar__btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: var(--tap);
+  min-height: var(--tap);
+  padding: var(--sp-1) var(--sp-3);
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--c-text-soft);
+  transition: color var(--duration) var(--ease), background var(--duration) var(--ease);
+}
+
+.bar__btn:active {
+  background: var(--c-surface-alt);
+  color: var(--c-text);
+}
+
+.bar__icon {
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.bar__label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
 .fab {
   display: grid;
   place-items: center;
+  /* 56 px: el control más usado de la aplicación y el más central. */
   width: 56px;
   height: 56px;
+  /* Sobresale de la barra para leerse como acción principal, no como una
+     pestaña más de navegación. */
+  margin-top: -18px;
   background: var(--c-accent);
   color: var(--c-accent-contrast);
-  border: none;
+  border: 3px solid var(--c-surface);
   border-radius: 50%;
   box-shadow: var(--shadow-md);
+  transition: transform var(--duration) var(--ease);
+}
+
+.fab__icon {
   font-size: 1.75rem;
   line-height: 1;
-  transition: transform var(--duration) var(--ease);
 }
 
 .fab:active {
   transform: scale(0.92);
 }
 
-/* --- Tarjetas -------------------------------------------------------- */
-
-.card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  padding: var(--sp-4);
+.bar__badge {
+  position: absolute;
+  top: -26px;
+  right: -6px;
+  padding: 2px 6px;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
-.card__head {
+/* --- Hojas deslizantes ------------------------------------------------ */
+
+.sheet__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(var(--c-scrim-rgb) / 55%);
+  opacity: 0;
+  transition: opacity var(--duration) var(--ease);
+}
+
+.sheet.is-open .sheet__backdrop {
+  opacity: 1;
+}
+
+.sheet__panel {
+  transform: translate3d(0, 100%, 0);
+  transition: transform 260ms var(--ease);
+  will-change: transform;
+}
+
+.sheet.is-open .sheet__panel {
+  transform: translate3d(0, 0, 0);
+}
+
+.sheet__header {
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
+  /* El arrastre de cierre nace aquí: se reserva el eje vertical. */
+  touch-action: none;
+  cursor: grab;
+}
+
+.sheet__handle {
+  width: 40px;
+  height: 4px;
+  margin: var(--sp-2) auto var(--sp-3);
+  background: var(--c-border);
+  border-radius: 999px;
+}
+
+.sheet__bar {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
 }
 
-.card__title {
+.sheet__title {
   font-size: var(--fs-lg);
   font-weight: 650;
 }
 
-.card__hint,
-.settings__engine {
-  color: var(--c-text-faint);
-  font-size: var(--fs-xs);
+.sheet__close {
+  display: grid;
+  place-items: center;
+  width: var(--tap);
+  height: var(--tap);
+  background: var(--c-surface-alt);
+  border: none;
+  border-radius: 50%;
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
 }
 
-/* --- Anillo de progreso ---------------------------------------------- */
+.sheet__description {
+  padding: 0 var(--sp-4) var(--sp-3);
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+}
+
+/* --- Anillo de progreso ----------------------------------------------- */
 
 .ring {
   position: relative;
@@ -120,7 +221,10 @@
   font-variant-numeric: tabular-nums;
 }
 
-.header[data-outcome="FAIL"] .ring__value {
+/* El color de aviso se reserva para cuando hay algo en juego: una racha viva
+   que el día actual rompería. Teñir el anillo por estar al 25 % a media mañana
+   sería una falsa alarma diaria. */
+.header--at-risk .ring__value {
   stroke: var(--c-warning);
 }
 
@@ -128,7 +232,7 @@
   color: var(--c-warning);
 }
 
-/* --- Estadísticas ---------------------------------------------------- */
+/* --- Estadísticas ------------------------------------------------------ */
 
 .stat {
   display: flex;
@@ -168,14 +272,119 @@
   letter-spacing: 2px;
 }
 
-/* --- Secciones ------------------------------------------------------- */
+.header__block {
+  align-self: flex-start;
+  padding: var(--sp-1) var(--sp-3);
+  background: var(--c-accent-soft);
+  border-radius: 999px;
+  color: var(--c-accent);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
 
-.section__title {
+.header__block[data-anchor="true"] {
+  background: var(--c-surface-alt);
+  color: var(--c-text-soft);
+}
+
+/* Una tarea de bloque rígido lleva marca lateral: no se decide, se cumple. */
+.task[data-anchor="true"] .task__surface {
+  border-left: 3px solid color-mix(in srgb, var(--c-text-soft) 45%, transparent);
+}
+
+/* --- Bloques plegables ------------------------------------------------- */
+
+.section {
+  background: transparent;
+}
+
+.section__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  min-height: var(--tap);
+  padding: var(--sp-2) var(--sp-2);
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  text-align: left;
+  transition: background var(--duration) var(--ease);
+}
+
+.section__toggle:active {
+  background: var(--c-surface-alt);
+}
+
+.section__icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.section__label {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.section__name {
+  font-size: var(--fs-md);
+  font-weight: 650;
+}
+
+.section__range {
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+}
+
+.section__meta {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  font-size: var(--fs-md);
-  font-weight: 650;
+  flex-wrap: wrap;
+}
+
+.section__anchor {
+  margin-left: var(--sp-1);
+  font-size: 0.75em;
+}
+
+/* Bloque en curso: barra lateral, fondo tenue y un punto que late. Es el
+   único elemento de la lista que se destaca, para que el ojo aterrice ahí al
+   abrir la aplicación. */
+.section[data-active="true"] {
+  position: relative;
+  padding-left: var(--sp-2);
+  background: color-mix(in srgb, var(--c-accent) 7%, transparent);
+  border-radius: var(--radius-md);
+  box-shadow: inset 3px 0 0 var(--c-accent);
+}
+
+.section__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-2);
+  background: var(--c-accent-soft);
+  border-radius: 999px;
+  color: var(--c-accent);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.section__pulse {
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  border-radius: 50%;
+  animation: pulse 2s var(--ease) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
 }
 
 .section__counter {
@@ -189,7 +398,18 @@
   font-weight: 700;
 }
 
-/* --- Ítem de tarea --------------------------------------------------- */
+.section__chevron {
+  color: var(--c-text-faint);
+  font-size: var(--fs-lg);
+  line-height: 1;
+  transition: transform var(--duration) var(--ease);
+}
+
+.section[data-collapsed="true"] .section__chevron {
+  transform: rotate(-90deg);
+}
+
+/* --- Ítem de tarea ----------------------------------------------------- */
 
 .task {
   position: relative;
@@ -199,6 +419,8 @@
   touch-action: pan-y;
 }
 
+/* Fondo de acción: su color aparece de forma progresiva con el arrastre, de
+   modo que el usuario ve hacia dónde va el gesto antes de soltarlo. */
 .task__affordances {
   position: absolute;
   inset: 0;
@@ -210,8 +432,35 @@
   font-weight: 700;
 }
 
+.task[data-swipe="complete"] .task__affordances {
+  background: rgb(var(--c-accent-rgb) / calc(var(--swipe-progress, 0) * 0.85));
+}
+
+.task[data-swipe="skip"] .task__affordances {
+  background: rgb(var(--c-warning-rgb) / calc(var(--swipe-progress, 0) * 0.8));
+}
+
 .task__affordance {
-  opacity: calc(var(--swipe-progress, 0) * 1);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  opacity: var(--swipe-progress, 0);
+}
+
+/* El texto vira de la tinta de la acción al blanco a medida que el fondo se
+   satura: legible tanto al empezar el gesto (fondo transparente) como al
+   llegar al umbral (fondo sólido). */
+.task__affordance-text {
+  color: color-mix(
+    in srgb,
+    var(--c-accent-contrast) calc(var(--swipe-progress, 0) * 100%),
+    currentColor
+  );
+}
+
+.task[data-swipe="complete"] .task__affordance--skip,
+.task[data-swipe="skip"] .task__affordance--complete {
+  opacity: 0;
 }
 
 .task__affordance--complete {
@@ -222,12 +471,29 @@
   color: var(--c-warning);
 }
 
-.task[data-swipe="complete"] .task__affordances {
-  background: var(--c-accent-soft);
+/* El icono crece con el avance y da un último salto al superar el umbral:
+   es la confirmación visual que acompaña a la vibración. */
+.task__affordance-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  /* Disco claro con el glifo en la tinta de la acción: al revés, el glifo
+     desaparecería en cuanto el fondo alcanzase ese mismo color. */
+  background: var(--c-surface);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  transform: scale(calc(0.55 + var(--swipe-progress, 0) * 0.45 + var(--swipe-overshoot, 0) * 0.18));
+  transition: transform 90ms var(--ease);
 }
 
-.task[data-swipe="skip"] .task__affordances {
-  background: var(--c-danger-soft);
+.task[data-armed] .task__affordance-icon {
+  box-shadow: 0 0 0 4px rgb(var(--c-accent-rgb) / 25%);
+}
+
+.task[data-armed][data-swipe="skip"] .task__affordance-icon {
+  box-shadow: 0 0 0 4px rgb(var(--c-warning-rgb) / 25%);
 }
 
 .task__surface {
@@ -236,7 +502,7 @@
   align-items: center;
   gap: var(--sp-3);
   min-height: var(--tap);
-  padding: var(--sp-3);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
@@ -249,7 +515,9 @@
   box-shadow: var(--shadow-md);
 }
 
+/* Círculo de 28 px con área táctil de 48: el dibujo no crece, el objetivo sí. */
 .task__check {
+  position: relative;
   display: grid;
   place-items: center;
   flex: none;
@@ -260,6 +528,16 @@
   border: 2px solid var(--c-border);
   border-radius: 50%;
   transition: background var(--duration) var(--ease), border-color var(--duration) var(--ease);
+}
+
+.task__check::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--tap);
+  height: var(--tap);
+  transform: translate(-50%, -50%);
 }
 
 .task__check-mark {
@@ -316,6 +594,12 @@
   text-decoration-style: wavy;
 }
 
+/* Escritura en vuelo (UI optimista): un matiz, no un spinner. Si la
+   transacción falla, el siguiente render revierte la fila. */
+.task--pending-write .task__surface {
+  border-color: color-mix(in srgb, var(--c-accent) 45%, var(--c-border));
+}
+
 .task__edit {
   flex: none;
   width: var(--tap);
@@ -327,7 +611,7 @@
   font-size: var(--fs-lg);
 }
 
-/* --- Estado vacío ---------------------------------------------------- */
+/* --- Estado vacío ------------------------------------------------------ */
 
 .empty {
   display: flex;
@@ -355,7 +639,23 @@
   max-width: 34ch;
 }
 
-/* --- Heatmap --------------------------------------------------------- */
+/* --- Heatmap ----------------------------------------------------------- */
+
+.heatmap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.heatmap__hint {
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+}
+
+.heatmap__scroller {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
 
 .heatmap__canvas {
   display: block;
@@ -389,7 +689,34 @@
   font-size: var(--fs-xs);
 }
 
-/* --- Formularios y ajustes ------------------------------------------- */
+.heatmap__stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--sp-2);
+  margin: 0;
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--c-border);
+}
+
+.heatmap__stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.heatmap__stat dt {
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+}
+
+.heatmap__stat dd {
+  margin: 0;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Formularios y ajustes --------------------------------------------- */
 
 .field {
   display: flex;
@@ -420,6 +747,72 @@
 .field__error {
   color: var(--c-danger);
   font-size: var(--fs-xs);
+}
+
+/* Selector de días de la semana: siete casillas de 48 px. */
+.daypicker {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: var(--sp-1);
+}
+
+.daypicker__option {
+  display: grid;
+  place-items: center;
+  min-height: var(--tap);
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  cursor: pointer;
+  transition: background var(--duration) var(--ease), color var(--duration) var(--ease);
+}
+
+.daypicker__input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.daypicker__option:has(.daypicker__input:checked) {
+  background: var(--c-accent);
+  border-color: transparent;
+  color: var(--c-accent-contrast);
+}
+
+/* Un día que el bloque no cubre no se puede elegir: marcarlo crearía una
+   tarea que nunca llegaría a mostrarse. */
+.daypicker__option.is-disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.daypicker__option:has(.daypicker__input:focus-visible) {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+.field__hint {
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.settings__storage {
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+}
+
+.settings__engine {
+  font-weight: 600;
 }
 
 .switch__label {
@@ -455,8 +848,8 @@
 .switch__track {
   position: relative;
   flex: none;
-  width: 46px;
-  height: 28px;
+  width: 52px;
+  height: 32px;
   background: var(--c-surface-alt);
   border: 1px solid var(--c-border);
   border-radius: 999px;
@@ -468,8 +861,8 @@
   position: absolute;
   top: 3px;
   left: 3px;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   background: var(--c-surface);
   border-radius: 50%;
   box-shadow: var(--shadow-sm);
@@ -482,7 +875,7 @@
 }
 
 .switch__input:checked + .switch__track::after {
-  transform: translateX(18px);
+  transform: translateX(20px);
 }
 
 .switch__input:disabled + .switch__track {
@@ -496,31 +889,13 @@
 
 .settings__actions {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--c-border);
 }
 
-/* --- Diálogo --------------------------------------------------------- */
-
-.dialog::backdrop {
-  background: rgb(9 14 20 / 55%);
-  backdrop-filter: blur(2px);
-}
-
-.dialog[open] {
-  animation: dialog-in 200ms var(--ease);
-}
-
-.dialog__title {
-  font-size: var(--fs-lg);
-}
-
-@keyframes dialog-in {
-  from { opacity: 0; transform: translateY(12px); }
-  to   { opacity: 1; transform: none; }
-}
-
-/* --- Avisos ---------------------------------------------------------- */
+/* --- Avisos ------------------------------------------------------------ */
 
 .toast {
   display: flex;
@@ -551,13 +926,15 @@
 }
 
 .toast__action {
+  min-height: var(--tap);
+  padding: 0 var(--sp-2);
   background: none;
   border: none;
   color: var(--c-accent);
   font-weight: 700;
 }
 
-/* --- Error de arranque ----------------------------------------------- */
+/* --- Error de arranque -------------------------------------------------- */
 
 .boot-error {
   display: flex;

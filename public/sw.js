@@ -18,11 +18,27 @@
 
 /* eslint-env serviceworker */
 
-const CACHE_NAME = 'routine-tracker-v2';
+const CACHE_NAME = 'routine-tracker-v3';
 const NAVIGATION_TIMEOUT_MS = 3000;
 
-/** Shell mínimo para arrancar sin red. */
-const PRECACHE_URLS = [
+/**
+ * Raíz efectiva de la aplicación. En GitHub Pages es `/<repo>/`, no `/`, así
+ * que cualquier ruta absoluta daría 404. `registration.scope` es la única
+ * fuente fiable: el worker puede haberse registrado bajo cualquier subruta.
+ */
+const APP_SCOPE = self.registration?.scope ?? new URL('./', self.location.href).href;
+
+/**
+ * Resuelve una ruta relativa contra la raíz de la aplicación.
+ * @param {string} path
+ * @returns {string} URL absoluta.
+ */
+function scoped(path) {
+  return new URL(path, APP_SCOPE).href;
+}
+
+/** Shell mínimo para arrancar sin red, en rutas relativas a la raíz de la app. */
+const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './public/manifest.webmanifest',
@@ -38,17 +54,22 @@ const PRECACHE_URLS = [
   './src/domain/dayResetService.js',
   './src/domain/routineService.js',
   './src/domain/selectors.js',
+  './src/domain/timeBlockService.js',
   './src/storage/storageAdapter.js',
   './src/storage/indexedDbService.js',
   './src/storage/localStorageService.js',
   './src/storage/repository.js',
+  './src/storage/seedData.js',
   './src/platform/gestures.js',
   './src/platform/haptics.js',
   './src/platform/wakeLock.js',
   './src/ui/renderer.js',
   './src/ui/dom.js',
+  './src/ui/components/bottomBar.js',
+  './src/ui/components/bottomSheet.js',
   './src/ui/components/header.js',
   './src/ui/components/taskItem.js',
+  './src/ui/components/touchTaskItem.js',
   './src/ui/components/taskList.js',
   './src/ui/components/heatmap.js',
   './src/ui/components/taskEditor.js',
@@ -59,12 +80,15 @@ const PRECACHE_URLS = [
   './src/ui/styles/components.css',
 ];
 
+/** El mismo shell, ya resuelto a URLs absolutas bajo la raíz de la app. */
+const SCOPED_ASSETS = ASSETS_TO_CACHE.map(scoped);
+
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE_NAME);
     // `addAll` es atómico: un 404 abortaría la instalación entera, así que
     // cada recurso se añade por separado y un fallo aislado no rompe el SW.
-    await Promise.all(PRECACHE_URLS.map(async (url) => {
+    await Promise.all(SCOPED_ASSETS.map(async (url) => {
       try {
         await cache.add(new Request(url, { cache: 'reload' }));
       } catch (error) {
@@ -96,6 +120,9 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+  // Fuera del alcance de la app (otra PWA en el mismo dominio de Pages) no
+  // es asunto de este worker.
+  if (!url.href.startsWith(APP_SCOPE)) return;
 
   if (request.mode === 'navigate') {
     event.respondWith(handleNavigation(event));
@@ -115,17 +142,17 @@ async function handleNavigation(event) {
   try {
     const preloaded = await event.preloadResponse;
     if (preloaded) {
-      void cache.put('./index.html', preloaded.clone());
+      void cache.put(scoped('./index.html'), preloaded.clone());
       return preloaded;
     }
     const response = await withTimeout(fetch(event.request), NAVIGATION_TIMEOUT_MS);
     if (response && response.ok) {
-      void cache.put('./index.html', response.clone());
+      void cache.put(scoped('./index.html'), response.clone());
     }
     return response;
   } catch {
-    return (await cache.match('./index.html'))
-      ?? (await cache.match('./'))
+    return (await cache.match(scoped('./index.html')))
+      ?? (await cache.match(scoped('./')))
       ?? new Response('<h1>Sin conexión</h1><p>Vuelve a intentarlo.</p>', {
         status: 503,
         headers: { 'Content-Type': 'text/html; charset=utf-8' },

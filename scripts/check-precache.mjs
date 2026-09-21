@@ -19,9 +19,9 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SW_PATH = resolve(ROOT, 'public/sw.js');
 
 const source = readFileSync(SW_PATH, 'utf8');
-const match = source.match(/const PRECACHE_URLS = \[([\s\S]*?)\];/);
+const match = source.match(/const ASSETS_TO_CACHE = \[([\s\S]*?)\];/);
 if (!match) {
-  console.error('No se encontró PRECACHE_URLS en public/sw.js');
+  console.error('No se encontró ASSETS_TO_CACHE en public/sw.js');
   process.exit(1);
 }
 

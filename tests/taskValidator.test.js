@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  uuid, isUuid, createTask, validateTask, validateDailyLog, createDailyLog,
-  createExecutionRecord, validateStreakState, validatePreferences, ValidationError,
+  uuid, isUuid, isTaskId, normalizeDaysOfWeek, createTask, validateTask,
+  validateDailyLog, createDailyLog, createExecutionRecord, validateStreakState,
+  validatePreferences, ValidationError,
 } from '../src/domain/taskValidator.js';
 import { DEFAULT_PREFERENCES, LIMITS, STREAK_CONFIG } from '../src/core/constants.js';
 
@@ -17,30 +18,69 @@ test('uuid genera identificadores v4 válidos y distintos', () => {
 });
 
 test('createTask normaliza y completa los campos', () => {
-  const task = createTask({ title: '  Meditar   10  min ', section: 'morning' });
+  const task = createTask({ title: '  Meditar   10  min ', sectionId: 'dawn' });
   assert.equal(task.title, 'Meditar 10 min', 'recorta y colapsa espacios');
   assert.ok(isUuid(task.id));
+  assert.equal(task.sectionId, 'dawn');
+  assert.deepEqual(task.daysOfWeek, [], 'sin días declarados, aplica todos');
   assert.equal(task.isArchived, false);
   assert.equal(task.estimatedMinutes, 5);
   assert.ok(Date.parse(task.createdAt));
 });
 
+test('isTaskId admite UUID v4 y slugs estables', () => {
+  assert.ok(isTaskId(uuid()));
+  assert.ok(isTaskId('task-tue-class'));
+  assert.ok(isTaskId('task_night_sleep'));
+  assert.ok(!isTaskId('ab'), 'demasiado corto');
+  assert.ok(!isTaskId('Task-Con-Mayúsculas'));
+  assert.ok(!isTaskId('tarea con espacios'));
+});
+
+test('el bloque genérico de la v2 se recoge en el cajón sin horario', () => {
+  for (const legacy of ['morning', 'afternoon', 'evening', 'anytime']) {
+    assert.equal(createTask({ title: 'Vieja', section: legacy }).sectionId, 'anytime');
+  }
+});
+
+test('isAnchor se hereda del bloque cuando no se declara', () => {
+  assert.equal(createTask({ title: 'Clase', sectionId: 'class_tuesday' }).isAnchor, true);
+  assert.equal(createTask({ title: 'Leer', sectionId: 'evening' }).isAnchor, false);
+  assert.equal(createTask({ title: 'Clase', sectionId: 'class_tuesday', isAnchor: false }).isAnchor, false);
+});
+
+test('la duración se deduce del rango horario si no se declara', () => {
+  assert.equal(createTask({ title: 'Comida', sectionId: 'lunch', timeStart: '14:00', timeEnd: '15:00' }).estimatedMinutes, 60);
+  assert.equal(createTask({ title: 'Sueño', sectionId: 'wind_down', timeStart: '23:00', timeEnd: '00:00' }).estimatedMinutes, 60);
+  assert.equal(createTask({ title: 'Clase', sectionId: 'class_friday', timeStart: '18:30', timeEnd: '20:30' }).estimatedMinutes, 120);
+  assert.equal(createTask({ title: 'Suelta', sectionId: 'anytime' }).estimatedMinutes, 5);
+});
+
+test('normalizeDaysOfWeek limpia, ordena y colapsa la semana completa', () => {
+  assert.deepEqual(normalizeDaysOfWeek([5, 1, 1, 3]).days, [1, 3, 5]);
+  assert.deepEqual(normalizeDaysOfWeek([0, 1, 2, 3, 4, 5, 6]).days, [], 'siete días = todos');
+  assert.deepEqual(normalizeDaysOfWeek(undefined).days, []);
+  assert.ok(normalizeDaysOfWeek([1, 9]).invalid);
+  assert.ok(normalizeDaysOfWeek('lunes').invalid);
+});
+
 test('validateTask rechaza entradas fuera de contrato', () => {
   assert.throws(() => createTask({ title: '' }), ValidationError);
   assert.throws(() => createTask({ title: 'x'.repeat(LIMITS.TASK_TITLE_MAX + 1) }), ValidationError);
-  assert.throws(() => createTask({ title: 'ok', section: 'madrugada' }), ValidationError);
-  assert.throws(() => createTask({ title: 'ok', estimatedMinutes: -3 }), ValidationError);
+  assert.throws(() => createTask({ title: 'ok', sectionId: 'madrugada' }), ValidationError);
+  assert.throws(() => createTask({ title: 'ok', sectionId: 'dawn', daysOfWeek: [7] }), ValidationError);
+  assert.throws(() => createTask({ title: 'ok', sectionId: 'dawn', timeStart: '25:00' }), ValidationError);
   assert.throws(() => validateTask({ title: 'sin id' }), ValidationError);
 });
 
 test('ValidationError enumera los campos problemáticos', () => {
   try {
-    createTask({ title: '', section: 'nope' });
+    createTask({ title: '', sectionId: 'nope' });
     assert.fail('debería lanzar');
   } catch (error) {
     assert.ok(error instanceof ValidationError);
     const fields = error.issues.map((i) => i.field);
-    assert.deepEqual(fields.sort(), ['section', 'title']);
+    assert.deepEqual(fields.sort(), ['sectionId', 'title']);
   }
 });
 
@@ -78,10 +118,17 @@ test('validateDailyLog respeta el contador declarado si no hay entries', () => {
   assert.equal(log.completionRate, 0.75);
 });
 
-test('validateDailyLog descarta claves que no son UUID', () => {
+test('validateDailyLog admite slugs de la semilla y rechaza basura', () => {
+  const log = validateDailyLog({
+    date: '2026-09-21',
+    totalActiveTasks: 2,
+    entries: { 'task-tue-class': { completed: true }, 'task-night-sleep': { completed: false } },
+  });
+  assert.equal(log.completedCount, 1);
+
   assert.throws(() => validateDailyLog({
     date: '2026-09-21',
-    entries: { 'tarea-1': { completed: true } },
+    entries: { 'clave con espacios': { completed: true } },
   }), ValidationError);
   assert.throws(() => validateDailyLog({ date: '21/09/2026' }), ValidationError);
 });

@@ -1,11 +1,21 @@
 /**
  * @module ui/components/taskItem
- * Ítem de tarea: checkbox accesible, gestos táctiles y retorno háptico.
+ * Ítem de tarea: presentación, estado y accesibilidad. El gesto en sí vive en
+ * `touchTaskItem.js`; aquí sólo se decide qué se ve.
  *
  *   swipe →  completar / descompletar
  *   swipe ←  dispensar (skip): la tarea sale del denominador del día
  *   tap      alterna completado
  *   botón ⋯  abre el editor
+ *
+ * ## UI optimista
+ *
+ * El estado visual se aplica **en el frame del gesto**, antes de que la
+ * transacción de IndexedDB resuelva. Una escritura tarda entre 5 y 60 ms en
+ * un móvil con la batería baja, y esperar a confirmarla rompe la ilusión de
+ * respuesta directa que sostiene un gesto táctil. Si la escritura falla, el
+ * servicio revierte el estado y el siguiente render devuelve la fila a su
+ * sitio: el error es visible, pero el caso normal es instantáneo.
  *
  * El gesto sólo transforma la capa `task__surface`; el fondo con los iconos de
  * acción permanece fijo, que es lo que produce la sensación de "revelar" en
@@ -13,9 +23,7 @@
  */
 
 import { h } from '../dom.js';
-import { attachSwipe } from '../../platform/gestures.js';
-import { GESTURE_CONFIG } from '../../core/constants.js';
-import { prefersReducedMotion } from '../dom.js';
+import { attachTaskGestures } from './touchTaskItem.js';
 
 /**
  * @param {{
@@ -38,7 +46,8 @@ export function createTaskItem(options) {
     'aria-pressed': String(Boolean(record.completed)),
     onClick: (event) => {
       event.stopPropagation();
-      onToggle(task.id);
+      haptics?.fire(record.completed ? 'UNDO' : 'COMPLETE');
+      commitComplete(!record.completed);
     },
   }, [h('span', { class: 'task__check-mark', 'aria-hidden': 'true', text: '✓' })]);
 
@@ -60,61 +69,57 @@ export function createTaskItem(options) {
 
   const el = h('li', {
     class: 'task',
-    dataset: { id: task.id, section: task.section },
+    dataset: { id: task.id, section: task.sectionId, anchor: String(Boolean(task.isAnchor)) },
   }, [
     h('div', { class: 'task__affordances', 'aria-hidden': 'true' }, [
-      h('span', { class: 'task__affordance task__affordance--complete', text: '✓ Completar' }),
-      h('span', { class: 'task__affordance task__affordance--skip', text: 'Dispensar ✕' }),
+      h('span', { class: 'task__affordance task__affordance--complete' }, [
+        h('span', { class: 'task__affordance-icon', text: '✓' }),
+        h('span', { class: 'task__affordance-text', text: 'Completar' }),
+      ]),
+      h('span', { class: 'task__affordance task__affordance--skip' }, [
+        h('span', { class: 'task__affordance-text', text: 'Hoy no' }),
+        h('span', { class: 'task__affordance-icon', text: '⤼' }),
+      ]),
     ]),
     surface,
   ]);
 
-  // El tap lo gestiona el reconocedor (no un click): así un arrastre que
-  // termina sobre el botón no dispara además el click del navegador.
-  const swipe = attachSwipe(surface, {
-    onPanStart: () => {
-      surface.classList.add('is-panning');
-      surface.style.transition = 'none';
-    },
-    onPan: ({ dx, ratio, direction }) => {
-      surface.style.transform = `translate3d(${dx}px, 0, 0)`;
-      el.dataset.swipe = direction > 0 ? 'complete' : 'skip';
-      el.style.setProperty('--swipe-progress', ratio.toFixed(3));
-      if (ratio >= 1 && !el.dataset.armed) {
-        el.dataset.armed = '1';
-        haptics?.fire('TAP');
-      } else if (ratio < 1 && el.dataset.armed) {
-        delete el.dataset.armed;
-      }
-    },
-    onCommit: ({ direction }) => {
-      settle();
-      if (direction > 0) {
-        haptics?.fire(record.completed ? 'UNDO' : 'COMPLETE');
-        onToggle(task.id);
-      } else {
-        haptics?.fire('SKIP');
-        onSkip(task.id);
-      }
-    },
-    onCancel: settle,
-    onTap: (ctx) => {
-      // Los botones internos ya tienen su propio manejador.
-      if (ctx.target instanceof Element && ctx.target.closest('button')) return;
-      haptics?.fire(record.completed ? 'UNDO' : 'COMPLETE');
-      onToggle(task.id);
-    },
+  const gestures = attachTaskGestures({
+    host: el,
+    surface,
+    haptics,
+    getModel: () => ({ task, record }),
+    onComplete: (completed) => commitComplete(completed),
+    onSkip: (skipped) => commitSkip(skipped),
+    onTap: () => commitComplete(!record.completed),
   });
 
-  function settle() {
-    surface.classList.remove('is-panning');
-    surface.style.transition = prefersReducedMotion()
-      ? 'none'
-      : `transform ${GESTURE_CONFIG.SETTLE_MS}ms cubic-bezier(.22,.61,.36,1)`;
-    surface.style.transform = 'translate3d(0, 0, 0)';
-    el.style.setProperty('--swipe-progress', '0');
-    delete el.dataset.swipe;
-    delete el.dataset.armed;
+  /**
+   * Pinta el nuevo estado ya y despacha la escritura después.
+   * @param {boolean} completed
+   */
+  function commitComplete(completed) {
+    applyVisualState({ completed, skipped: false });
+    onToggle(task.id);
+  }
+
+  /** @param {boolean} skipped */
+  function commitSkip(skipped) {
+    applyVisualState({ completed: false, skipped });
+    onSkip(task.id);
+  }
+
+  /**
+   * Estado visual inmediato, sin esperar a la persistencia. No toca `record`:
+   * la verdad sigue siendo el store, y el siguiente `update()` reconcilia (o
+   * revierte, si la escritura falló).
+   * @param {{completed: boolean, skipped: boolean}} next
+   */
+  function applyVisualState(next) {
+    el.classList.toggle('task--done', next.completed);
+    el.classList.toggle('task--skipped', next.skipped);
+    el.classList.add('task--pending-write');
+    check.setAttribute('aria-pressed', String(next.completed));
   }
 
   /**
@@ -130,7 +135,9 @@ export function createTaskItem(options) {
       title.textContent = task.title;
       editBtn.setAttribute('aria-label', `Editar «${task.title}»`);
     }
-    el.dataset.section = task.section;
+    el.dataset.section = task.sectionId;
+    el.dataset.anchor = String(Boolean(task.isAnchor));
+    el.classList.remove('task--pending-write');
     el.classList.toggle('task--done', Boolean(record.completed));
     el.classList.toggle('task--skipped', Boolean(record.skipped));
     check.setAttribute('aria-pressed', String(Boolean(record.completed)));
@@ -146,7 +153,7 @@ export function createTaskItem(options) {
     el,
     update,
     destroy() {
-      swipe.destroy();
+      gestures.destroy();
     },
   };
 }
@@ -159,5 +166,11 @@ function buildMeta(task, record) {
       ? 'Completada'
       : `Completada · ${time.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}`;
   }
-  return task.estimatedMinutes > 0 ? `${task.estimatedMinutes} min` : 'Sin duración estimada';
+  // La hora de referencia manda sobre la duración: en una agenda, "17:00"
+  // informa más que "60 min".
+  const parts = [];
+  if (task.timeStart) parts.push(task.timeEnd ? `${task.timeStart} – ${task.timeEnd}` : task.timeStart);
+  else if (task.estimatedMinutes > 0) parts.push(`${task.estimatedMinutes} min`);
+  if (task.daysLabel && task.daysLabel !== 'Todos los días') parts.push(task.daysLabel);
+  return parts.join(' · ') || 'Sin horario';
 }

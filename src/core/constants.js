@@ -12,8 +12,12 @@
 /** @type {string} Nombre de la base IndexedDB. */
 export const DB_NAME = 'routine_tracker_db';
 
-/** @type {number} Versión del esquema IndexedDB (v2 = tasks + daily_logs + system_metadata). */
-export const DB_VERSION = 2;
+/**
+ * @type {number} Versión del esquema IndexedDB.
+ *   v2 — tasks + daily_logs + system_metadata con bloques genéricos.
+ *   v3 — bloques horarios por día: `sectionId`, `daysOfWeek`, `timeStart/End`, `isAnchor`.
+ */
+export const DB_VERSION = 3;
 
 /** Nombres de object stores. @enum {string} */
 export const STORES = Object.freeze({
@@ -27,7 +31,7 @@ export const STORES = Object.freeze({
 /** Índices declarados por store. @enum {Object.<string,string>} */
 export const INDICES = Object.freeze({
   [STORES.TASKS]: Object.freeze({
-    idx_section: 'section',
+    idx_section: 'sectionId',
     idx_order: 'order',
     idx_archived: 'isArchived',
   }),
@@ -52,35 +56,18 @@ export const LS_KEYS = Object.freeze({
 });
 
 /** Identificador del caché del Service Worker (sincronizado manualmente con `public/sw.js`). */
-export const CACHE_NAME = 'routine-tracker-v2';
+export const CACHE_NAME = 'routine-tracker-v3';
 
 /* ------------------------------------------------------------------ *
  * Dominio
  * ------------------------------------------------------------------ */
 
-/** Bloques del día. @enum {string} */
-export const SECTIONS = Object.freeze({
-  MORNING: 'morning',
-  AFTERNOON: 'afternoon',
-  EVENING: 'evening',
-  ANYTIME: 'anytime',
-});
-
-/** @type {ReadonlyArray<string>} Orden canónico de render de los bloques. */
-export const SECTION_ORDER = Object.freeze([
-  SECTIONS.MORNING,
-  SECTIONS.AFTERNOON,
-  SECTIONS.EVENING,
-  SECTIONS.ANYTIME,
-]);
-
-/** Metadatos de presentación por bloque. */
-export const SECTION_META = Object.freeze({
-  [SECTIONS.MORNING]: { label: 'Mañana', icon: '☀️', range: '05:00 – 12:00' },
-  [SECTIONS.AFTERNOON]: { label: 'Tarde', icon: '🌤️', range: '12:00 – 19:00' },
-  [SECTIONS.EVENING]: { label: 'Noche', icon: '🌙', range: '19:00 – 00:00' },
-  [SECTIONS.ANYTIME]: { label: 'Cualquier momento', icon: '🕒', range: 'Libre' },
-});
+/**
+ * Los bloques del día ya no son una enumeración fija de cuatro valores: son la
+ * agenda real del usuario, condicionada por el día de la semana, y viven en
+ * `src/domain/timeBlockService.js` (`BLOCK_CATALOG`). Aquí sólo quedan los
+ * parámetros que no dependen de esa agenda.
+ */
 
 /** Resultado de la evaluación de un día cerrado. @enum {string} */
 export const DAY_OUTCOME = Object.freeze({
@@ -109,6 +96,8 @@ export const RESET_STATE = Object.freeze({
   SCHEDULED: 'SCHEDULED',
   EVALUATING: 'EVALUATING',
   RECONCILING: 'RECONCILING',
+  /** El reloj retrocedió por debajo del último día evaluado: cálculo congelado. */
+  FROZEN: 'FROZEN',
   ERROR: 'ERROR',
 });
 
@@ -159,14 +148,30 @@ export const GESTURE_CONFIG = Object.freeze({
   TAP_SLOP: 8,
   /** Desplazamiento horizontal mínimo para entrar en estado PANNING. */
   PAN_THRESHOLD: 12,
-  /** Fracción del ancho del elemento necesaria para confirmar el swipe. */
+  /** Fracción del ancho del elemento que confirma la acción (umbral de disparo). */
   COMMIT_RATIO: 0.35,
   /** Velocidad (px/ms) que confirma el swipe aunque no se alcance COMMIT_RATIO. */
   FLING_VELOCITY: 0.45,
-  /** Resistencia elástica más allá del umbral de confirmación. */
-  RUBBER_BAND: 0.35,
+  /** A partir de esta fracción del ancho, el arrastre entra en fricción logarítmica. */
+  FRICTION_RATIO: 0.5,
+  /** Coeficiente k de la fricción: dx' = límite + k·ln(1 + exceso/k). */
+  FRICTION_COEFFICIENT: 48,
   /** Duración de la animación de retorno/salida (ms). */
   SETTLE_MS: 180,
+});
+
+/** Parámetros de la hoja deslizante inferior. */
+export const SHEET_CONFIG = Object.freeze({
+  /** Fracción de la altura de la hoja que confirma el cierre por arrastre. */
+  DISMISS_RATIO: 0.3,
+  /** Velocidad (px/ms) que cierra la hoja aunque no se alcance DISMISS_RATIO. */
+  DISMISS_VELOCITY: 0.5,
+  /** Recorrido mínimo para que un gesto rápido cuente como cierre. */
+  DISMISS_MIN_PX: 24,
+  /** Resistencia al arrastrar hacia arriba (la hoja no sube). */
+  UPWARD_RESISTANCE: 0.12,
+  /** Duración de entrada/salida, sincronizada con el CSS. */
+  TRANSITION_MS: 260,
 });
 
 /** Patrones de vibración (Vibration API). @enum {Array<number>|number} */
@@ -193,6 +198,8 @@ export const EVENTS = Object.freeze({
   SHIELD_CONSUMED: 'streak:shield-consumed',
   TOAST: 'ui:toast',
   ERROR: 'app:error',
+  SECTION_TOGGLED: 'ui:section-toggled',
+  CLOCK_DESYNC: 'app:clock-desync',
 });
 
 /** Máximos de validación del modelo de datos. */
@@ -200,4 +207,10 @@ export const LIMITS = Object.freeze({
   TASK_TITLE_MAX: 80,
   TASK_MINUTES_MAX: 24 * 60,
   HEATMAP_WEEKS: 20,
+  /**
+   * Objetivo táctil mínimo en px. 48 es la recomendación de las WCAG 2.2
+   * (criterio 2.5.8, nivel AA) y de Material: por debajo, el índice de error
+   * al tocar con el pulgar crece de forma marcada.
+   */
+  TAP_TARGET_MIN: 48,
 });
