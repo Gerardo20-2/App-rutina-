@@ -16,9 +16,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-# Permisos mínimos para publicar en Pages con OIDC.
+# Permisos para publicar en Pages y hacer push a gh-pages.
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
