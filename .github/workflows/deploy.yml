@@ -65,20 +65,22 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A .nojekyll public/ src/ index.html
 
-          # Crear un árbol limpio solo con los artefactos de despliegue
+          # Fetch la rama gh-pages si existe, pero no fallar si no existe
+          git fetch origin gh-pages --depth=1 2>/dev/null || true
+
+          # Preparar los archivos para despliegue
+          git add -A .nojekyll public/ src/ index.html
           TREE=$(git write-tree)
 
-          # Obtener el commit padre del gh-pages actual (si existe)
-          GH_PAGES_COMMIT=$(git rev-parse origin/gh-pages 2>/dev/null || echo "")
-
           # Crear el commit en gh-pages
-          if [ -n "$GH_PAGES_COMMIT" ]; then
-            COMMIT=$(git commit-tree $TREE -p $GH_PAGES_COMMIT -m "Deploy: $GITHUB_SHA")
-          else
-            COMMIT=$(git commit-tree $TREE -m "Deploy: $GITHUB_SHA")
+          # Intentar obtener el padre; si no existe, crear sin padre (rama huérfana)
+          PARENT=""
+          if git rev-parse origin/gh-pages >/dev/null 2>&1; then
+            PARENT="-p $(git rev-parse origin/gh-pages)"
           fi
+
+          COMMIT=$(git commit-tree $TREE $PARENT -m "Deploy: $GITHUB_SHA")
 
           # Actualizar la rama gh-pages
           git update-ref refs/heads/gh-pages $COMMIT
