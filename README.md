@@ -491,9 +491,16 @@ Ante un fallo de red, reintenta el push con espera creciente (2 s, 4 s, 8 s,
 
 ### Publicación
 
-1. **Settings → Pages → Source: “GitHub Actions”** (una sola vez).
-2. Cada `push` a `main` ejecuta `deploy.yml`: pruebas → verificación de iconos
-   → publicación del repositorio completo como artefacto de Pages.
+Cada `push` a `main` ejecuta `deploy.yml`: pruebas → verificación de iconos →
+publicación del repositorio completo como artefacto de Pages. El workflow
+activa Pages por sí mismo la primera vez (`configure-pages` con
+`enablement: true`), así que no hay nada que configurar a mano.
+
+> **Requisito de la cuenta.** GitHub Pages sólo está disponible en
+> repositorios **públicos** o, si el repositorio es privado, con un plan de
+> pago (GitHub Pro). En un repositorio privado de una cuenta gratuita el
+> despliegue falla en `configure-pages` con
+> `Get Pages site failed… verify that the repository has Pages enabled`.
 
 No hay paso de compilación porque no hace falta: el repositorio *es* la
 aplicación. Todas las rutas son relativas, así que funciona igual en la raíz de
