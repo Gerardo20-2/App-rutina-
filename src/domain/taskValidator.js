@@ -12,7 +12,7 @@ import { isBlockId, getBlock, FALLBACK_BLOCK_ID } from './timeBlockService.js';
 /**
  * @typedef {Object} TaskDefinition
  * @property {string} id               Identificador único: UUID v4 o slug estable.
- * @property {string} title            Nombre legible (máx. 80 caracteres).
+ * @property {string} title            Nombre legible, texto plano saneado (máx. `LIMITS.TASK_TITLE_MAX`).
  * @property {string} sectionId        Identificador del bloque horario.
  * @property {number[]} daysOfWeek     Días activos (0 = domingo … 6 = sábado). Vacío = todos.
  * @property {string} [timeStart]      Hora de referencia "HH:mm".
@@ -45,6 +45,18 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
 /** Identificador legible y estable, p. ej. `task-tue-class`. */
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/;
+
+/**
+ * Caracteres invisibles que no aportan nada a un título y sí sirven para
+ * engañar: controles C0/C1 (incluido ESC, que abre secuencias ANSI), marcas y
+ * overrides bidireccionales (ataques «Trojan Source» que invierten el texto
+ * visible), espacios de ancho cero y el BOM. Se conservan ZWNJ/ZWJ (U+200C/D),
+ * necesarios para componer emojis y algunos alfabetos.
+ */
+// eslint-disable-next-line no-control-regex
+const INVISIBLE_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/g;
+/** Saltos de línea y tabuladores: se convierten en espacio, no se pegan palabras. */
+const BREAKS_RE = /[\t\n\r\u2028\u2029]/g;
 
 /**
  * Bloques genéricos de la v2, previos a la agenda por día. Sus tareas se
@@ -105,6 +117,28 @@ export function isTaskId(value) {
 }
 
 /**
+ * Sanitiza texto libre del usuario: normaliza a NFC, sustituye surrogates
+ * sueltos, elimina caracteres de control e invisibles, colapsa espacios y
+ * recorta. El resultado es texto plano: la UI lo pinta con `textContent`, así
+ * que el marcado HTML no se escapa aquí (lo haría ilegible), simplemente
+ * nunca se interpreta.
+ * @param {*} value
+ * @returns {string}
+ */
+export function sanitizeText(value) {
+  if (typeof value !== 'string') return '';
+  const wellFormed = typeof value.toWellFormed === 'function'
+    ? value.toWellFormed()
+    : value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+  return wellFormed
+    .normalize('NFC')
+    .replace(BREAKS_RE, ' ')
+    .replace(INVISIBLE_RE, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Normaliza `daysOfWeek`: enteros 0–6, sin duplicados y ordenados. Un array
  * con los siete días equivale a «todos», que se representa con el vacío.
  * @param {*} value
@@ -150,7 +184,7 @@ export function validateTask(input, options = {}) {
   const id = input.id ?? (options.partial ? uuid() : undefined);
   if (!isTaskId(id)) issues.push({ field: 'id', message: 'se esperaba un UUID v4 o un identificador estable' });
 
-  const title = typeof input.title === 'string' ? input.title.trim().replace(/\s+/g, ' ') : '';
+  const title = sanitizeText(input.title);
   if (title.length === 0) {
     issues.push({ field: 'title', message: 'el título es obligatorio' });
   } else if (title.length > LIMITS.TASK_TITLE_MAX) {

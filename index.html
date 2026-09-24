@@ -2,6 +2,12 @@
 <html lang="es" data-theme-default="system">
 <head>
   <meta charset="UTF-8">
+  <!-- Política de seguridad de contenido. Va justo tras el charset: sólo
+       protege lo que se declara después de ella. Sin backend no hay nada
+       a lo que conectarse fuera del propio origen; `frame-ancestors` no
+       admite meta etiqueta y GitHub Pages no permite cabeceras propias. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; manifest-src 'self'; connect-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>RoutineTracker — rutina diaria offline</title>
   <meta name="description" content="Seguimiento de rutinas diarias offline-first: tus tareas, tus rachas y tu historial, guardados sólo en tu dispositivo.">

@@ -29,6 +29,7 @@
 import {
   minutesOfDay, normalizeRange, parseTime, formatMinutes, dayOfWeek, fromDateKey,
 } from '../core/dateUtils.js';
+import { deepFreeze } from '../security/objectGuard.js';
 
 /** Todos los días de la semana, en la numeración de `getDay()`. */
 const EVERY_DAY = Object.freeze([0, 1, 2, 3, 4, 5, 6]);
@@ -63,7 +64,7 @@ const WEEKDAYS = Object.freeze([1, 2, 3, 4, 5]);
  */
 
 /** Catálogo de bloques. Es la agenda declarada, no una preferencia de UI. */
-export const BLOCK_CATALOG = Object.freeze({
+export const BLOCK_CATALOG = deepFreeze({
   dawn: {
     id: 'dawn', label: 'Arranque', icon: '🌅', isAnchor: false,
     rules: [{ days: WEEKDAYS, start: '04:30', end: '08:30' }],

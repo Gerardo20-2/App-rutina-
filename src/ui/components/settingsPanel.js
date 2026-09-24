@@ -1,7 +1,10 @@
 /**
  * @module ui/components/settingsPanel
  * Panel de preferencias y gestión de datos: háptica, Screen Wake Lock, tema y
- * export/import del volcado JSON.
+ * export/import de copias de seguridad cifradas.
+ *
+ * La frase de paso nunca se guarda: vive sólo en el campo mientras la hoja
+ * está abierta y se borra tras cada uso correcto.
  *
  * Los interruptores de capacidades nativas se deshabilitan cuando el
  * navegador no las expone y explican por qué: es preferible a un control que
@@ -9,12 +12,13 @@
  */
 
 import { h } from '../dom.js';
+import { CRYPTO_CONFIG } from '../../security/cryptoService.js';
 
 /**
  * @param {{
  *   onPreferenceChange: (patch: Object) => void,
- *   onExport: () => void,
- *   onImport: (file: File) => void,
+ *   onExport: (passphrase: string) => void,
+ *   onImport: (file: File, passphrase: string) => void,
  *   onWipe: () => void,
  *   capabilities: {haptics: boolean, wakeLock: boolean},
  * }} handlers
@@ -51,9 +55,16 @@ export function createSettingsPanel(handlers) {
     type: 'file', accept: 'application/json,.json', class: 'sr-only', id: 'import-file',
     onChange: (event) => {
       const [file] = event.target.files ?? [];
-      if (file) handlers.onImport(file);
+      if (file) handlers.onImport(file, passphraseInput.value);
       event.target.value = '';
     },
+  });
+
+  const passphraseInput = h('input', {
+    class: 'field__input', id: 'backup-passphrase', type: 'password',
+    autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off',
+    minlength: String(CRYPTO_CONFIG.PASSPHRASE_MIN), maxlength: '256',
+    'aria-describedby': 'backup-passphrase-hint',
   });
 
   const engineEl = h('span', { class: 'settings__engine' });
@@ -71,8 +82,19 @@ export function createSettingsPanel(handlers) {
       h('label', { class: 'field__label', for: 'pref-theme', text: 'Tema' }),
       themeSelect,
     ]),
+    h('div', { class: 'field' }, [
+      h('label', { class: 'field__label', for: 'backup-passphrase', text: 'Frase de cifrado de la copia' }),
+      passphraseInput,
+      h('p', {
+        class: 'field__hint', id: 'backup-passphrase-hint',
+        text: `Mínimo ${CRYPTO_CONFIG.PASSPHRASE_MIN} caracteres. La copia se cifra con AES-256; sin esta frase no se puede recuperar.`,
+      }),
+    ]),
     h('div', { class: 'settings__actions' }, [
-      h('button', { class: 'btn', type: 'button', text: '⬇︎ Exportar datos', onClick: () => handlers.onExport() }),
+      h('button', {
+        class: 'btn', type: 'button', text: '⬇︎ Exportar copia cifrada',
+        onClick: () => handlers.onExport(passphraseInput.value),
+      }),
       h('label', { class: 'btn', for: 'import-file', text: '⬆︎ Importar datos' }),
       fileInput,
       h('button', {
@@ -91,7 +113,16 @@ export function createSettingsPanel(handlers) {
     engineEl.dataset.engine = state.ui.persistence;
   }
 
-  return { el, update, destroy() {} };
+  return {
+    el,
+    update,
+    clearPassphrase() {
+      passphraseInput.value = '';
+    },
+    destroy() {
+      passphraseInput.value = '';
+    },
+  };
 }
 
 function createToggle({ id, label, hint, disabled, onChange }) {

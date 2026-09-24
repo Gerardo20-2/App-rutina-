@@ -14,6 +14,7 @@
 
 import { StorageAdapter, StorageError } from './storageAdapter.js';
 import { LS_KEYS, STORES } from '../core/constants.js';
+import { safeJsonParse } from '../security/objectGuard.js';
 
 /** Clave primaria de cada store, equivalente al `keyPath` de IndexedDB. */
 const KEY_PATHS = Object.freeze({
@@ -142,7 +143,7 @@ export class LocalStorageService extends StorageAdapter {
     try {
       const raw = this._backend.getItem(this._key(store));
       if (raw) {
-        const value = JSON.parse(raw);
+        const value = safeJsonParse(raw);
         if (value && typeof value === 'object' && !Array.isArray(value)) parsed = value;
       }
     } catch (error) {

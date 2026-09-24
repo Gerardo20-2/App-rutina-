@@ -8,7 +8,8 @@
  *  - Selección de motor (IndexedDB → localStorage → memoria).
  *  - Validación en frontera (todo lo que entra y sale pasa por el validador).
  *  - Migración del estado monolítico v1 (`APP_STATE_V1` en localStorage).
- *  - Export/import de copias de seguridad en JSON.
+ *  - Export/import de copias de seguridad, cifradas con AES-GCM
+ *    (`security/cryptoService.js`) y parseadas sin claves de prototipo.
  */
 
 import { IndexedDbService } from './indexedDbService.js';
@@ -34,6 +35,11 @@ import {
   isTaskId,
 } from '../domain/taskValidator.js';
 import { toDateKey, isDateKey, addDays, parseTime } from '../core/dateUtils.js';
+import { safeJsonParse, sanitizeDeep } from '../security/objectGuard.js';
+import { encryptJson, decryptJson, isEncryptedEnvelope } from '../security/cryptoService.js';
+
+/** Metadatos que un backup puede restaurar; cualquier otra clave se ignora. */
+const IMPORTABLE_META_KEYS = new Set(Object.values(META_KEYS));
 
 export class Repository {
   /** @param {{adapter?: import('./storageAdapter.js').StorageAdapter}} [options] */
@@ -325,28 +331,54 @@ export class Repository {
    * Copias de seguridad y migración
    * ---------------------------------------------------------------- */
 
-  /** @returns {Promise<Object>} volcado serializable. */
+  /** @returns {Promise<Object>} volcado serializable, en claro. */
   async exportBackup() {
     const dump = await this._adapter.exportAll();
     return { app: 'routine-tracker', schema: DB_VERSION, ...dump };
   }
 
   /**
-   * @param {Object|string} payload volcado (objeto o JSON).
-   * @returns {Promise<{tasks:number, logs:number}>}
+   * Volcado cifrado: la única forma de backup que ofrece la interfaz.
+   * @param {string} passphrase
+   * @returns {Promise<import('../security/cryptoService.js').EncryptedEnvelope>}
    */
-  async importBackup(payload) {
-    const dump = typeof payload === 'string' ? JSON.parse(payload) : payload;
-    if (!dump?.data || typeof dump.data !== 'object') {
+  async exportEncryptedBackup(passphrase) {
+    return encryptJson(await this.exportBackup(), passphrase);
+  }
+
+  /**
+   * Acepta un sobre cifrado (requiere `passphrase`) o, por compatibilidad con
+   * copias anteriores, un volcado en claro. En ambos casos el JSON se parsea
+   * sin `__proto__`/`constructor`/`prototype` y cada fila se revalida.
+   * @param {Object|string} payload volcado (objeto o JSON).
+   * @param {{passphrase?: string}} [options]
+   * @returns {Promise<{tasks:number, logs:number, encrypted:boolean}>}
+   */
+  async importBackup(payload, options = {}) {
+    let dump;
+    try {
+      dump = typeof payload === 'string' ? safeJsonParse(payload) : sanitizeDeep(payload);
+    } catch (error) {
+      throw new StorageError('El archivo no es JSON válido', { cause: error, code: 'BAD_DUMP' });
+    }
+    const encrypted = isEncryptedEnvelope(dump);
+    if (encrypted) {
+      if (!options.passphrase) {
+        throw new StorageError('Copia cifrada: hace falta la frase de paso', { code: 'PASSPHRASE_REQUIRED' });
+      }
+      dump = await decryptJson(dump, options.passphrase);
+    }
+    if (!dump?.data || typeof dump.data !== 'object' || Array.isArray(dump.data)) {
       throw new StorageError('El archivo no contiene un volcado válido', { code: 'BAD_DUMP' });
     }
+    const rows = (store) => (Array.isArray(dump.data[store]) ? dump.data[store] : []);
     // Se valida ANTES de tocar la base: un import corrupto no debe dejar
     // el almacenamiento a medias.
-    const tasks = (dump.data[STORES.TASKS] ?? [])
+    const tasks = rows(STORES.TASKS)
       .map((row) => safeTask(row))
       .filter(Boolean)
       .map(withInternal);
-    const logs = (dump.data[STORES.DAILY_LOGS] ?? [])
+    const logs = rows(STORES.DAILY_LOGS)
       .map((row) => {
         try {
           return validateDailyLog(row);
@@ -355,7 +387,8 @@ export class Repository {
         }
       })
       .filter(Boolean);
-    const metadata = (dump.data[STORES.SYSTEM_METADATA] ?? []).filter((row) => typeof row?.key === 'string');
+    const metadata = rows(STORES.SYSTEM_METADATA)
+      .filter((row) => typeof row?.key === 'string' && IMPORTABLE_META_KEYS.has(row.key));
 
     await this._adapter.importAll({
       version: DB_VERSION,
@@ -366,7 +399,7 @@ export class Repository {
       },
     });
     await this._ensureMetadata();
-    return { tasks: tasks.length, logs: logs.length };
+    return { tasks: tasks.length, logs: logs.length, encrypted };
   }
 
   /**
@@ -385,7 +418,7 @@ export class Repository {
 
     let legacy;
     try {
-      legacy = JSON.parse(raw);
+      legacy = safeJsonParse(raw);
     } catch (error) {
       console.warn('[Repository] APP_STATE_V1 ilegible, se descarta', error);
       safeRemoveLegacy();

@@ -27,6 +27,7 @@ propia aplicación.
 - [Despliegue](#despliegue)
 - [Compatibilidad y degradación](#compatibilidad-y-degradación)
 - [Privacidad](#privacidad)
+- [Seguridad client-side](#seguridad-client-side)
 
 ---
 
@@ -46,7 +47,7 @@ propia aplicación.
 | Pantalla | Screen Wake Lock opcional con re-adquisición automática |
 | Visualización | Heatmap de 20 semanas dibujado en `<canvas>` con soporte de alta densidad y tema claro/oscuro |
 | PWA | Manifest instalable, iconos *maskable*, Service Worker con estrategias diferenciadas y aviso de actualización |
-| Datos | Exportación e importación del volcado completo en JSON |
+| Datos | Copias de seguridad cifradas (AES-256-GCM + PBKDF2) con verificación SHA-256 al importar |
 | Primer arranque | Rutina real precargada (13 tareas repartidas por la semana): la app se usa antes de configurarla |
 | Robustez | Bloques plegables, aviso y congelación del cálculo diario si el reloj del dispositivo retrocede |
 | Accesibilidad | Objetivos táctiles de 44 px, foco visible, `aria-live` en avisos, equivalentes textuales del heatmap, respeto por `prefers-reduced-motion` |
@@ -201,6 +202,9 @@ routine-tracker/
 │   │   ├── repository.js          # Fachada de dominio y migraciones
 │   │   ├── seedData.js            # Rutina real precargada
 │   │   └── storageAdapter.js      # Interfaz base
+│   ├── security/
+│   │   ├── cryptoService.js       # PBKDF2 + AES-GCM, sobres de backup cifrados
+│   │   └── objectGuard.js         # JSON sin __proto__, deepFreeze, saneado profundo
 │   ├── platform/
 │   │   ├── gestures.js            # Reconocedor de swipe (Pointer Events)
 │   │   ├── haptics.js             # Vibration API
@@ -406,7 +410,7 @@ __routineTracker.dayReset.check('manual')  // forzar el corte de día
 npm test                          # o: node --test tests/*.test.js
 ```
 
-132 pruebas sobre el runner nativo de Node, sin navegador ni dependencias:
+161 pruebas sobre el runner nativo de Node, sin navegador ni dependencias:
 
 | Archivo | Cubre |
 |---|---|
@@ -418,6 +422,7 @@ npm test                          # o: node --test tests/*.test.js
 | `deployPaths.test.js` | Ninguna ruta absoluta; resolución del manifest y del precaché bajo subdirectorio |
 | `repository.test.js` | Persistencia, migración v1, siembra real, divisor por día, UI optimista y su reversión |
 | `dayResetService.test.js` | Corte de medianoche, ausencias con divisor por agenda, reloj desincronizado |
+| `security.test.js` | Payloads XSS renderizados como texto, cifrado/descifrado, clave errónea, sobres adulterados, JSON con `__proto__`, CSP y Service Worker |
 | `events.test.js` | Bus de eventos y aislamiento de errores |
 
 Comprobaciones adicionales en CI:
@@ -526,8 +531,29 @@ háptica— está pensada para Chromium en Android y Safari en iOS.
 ## Privacidad
 
 No hay servidor, cuentas, analítica ni peticiones a terceros. Los datos se
-quedan en el navegador y sólo salen del dispositivo si tú descargas el volcado
-JSON. Borrar los datos del sitio borra la aplicación por completo.
+quedan en el navegador y sólo salen del dispositivo si tú descargas una copia,
+que siempre va cifrada. Borrar los datos del sitio borra la aplicación por
+completo.
+
+## Seguridad client-side
+
+Sin backend no hay inyección SQL ni base de datos central que filtrar: la
+superficie de ataque es el propio navegador. Las defensas, sin librerías:
+
+| Capa | Medida |
+|---|---|
+| XSS | Ningún `innerHTML`/`outerHTML`/`document.write`/`eval`: todo el DOM se construye con `createElement` + `textContent` (`src/ui/dom.js`). Una prueba estática lo vigila en CI. |
+| Entradas | `sanitizeText` normaliza a NFC y elimina controles C0/C1, secuencias ESC, overrides bidireccionales y espacios de ancho cero; título limitado a `LIMITS.TASK_TITLE_MAX`. |
+| Prototype pollution | Todo JSON externo pasa por `safeJsonParse` (descarta `__proto__`, `constructor`, `prototype`); los catálogos globales están congelados en profundidad; el import sólo acepta claves de metadatos conocidas. |
+| Copias | Sobre `{ format, version, kdf, iterations, cipher, salt, iv, ciphertext, checksum }`: PBKDF2-SHA-256 (100 000 iteraciones, salt de 16 B) → AES-256-GCM (IV de 12 B por operación), cabecera autenticada como AAD. El checksum SHA-256 se verifica antes de derivar la clave. Las copias en claro antiguas se siguen aceptando, revalidadas fila a fila. |
+| CSP | Meta etiqueta con `default-src 'none'`, `script-src 'self'`, `connect-src 'self'`, `base-uri 'none'`, `form-action 'none'`, `object-src 'none'`. |
+| Service Worker | Rechaza subrecursos de otro origen con error de red; sólo cachea respuestas `basic`, del mismo origen y sin redirección. |
+
+Límites conocidos: el checksum SHA-256 sin clave detecta corrupción, pero es
+la etiqueta GCM la que impide falsificar una copia. La base de datos local
+(IndexedDB) **no** está cifrada en reposo: hacerlo exige pedir un PIN en cada
+arranque. `frame-ancestors` y las cabeceras HTTP no se pueden fijar desde
+GitHub Pages.
 
 ---
 

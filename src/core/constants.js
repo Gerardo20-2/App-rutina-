@@ -5,6 +5,11 @@
  * literales de configuración.
  */
 
+import { deepFreeze } from '../security/objectGuard.js';
+
+// Los catálogos se congelan en profundidad: un `Object.freeze` superficial
+// dejaría mutables las listas anidadas, p. ej. los patrones de vibración.
+
 /* ------------------------------------------------------------------ *
  * Persistencia
  * ------------------------------------------------------------------ */
@@ -20,7 +25,7 @@ export const DB_NAME = 'routine_tracker_db';
 export const DB_VERSION = 3;
 
 /** Nombres de object stores. @enum {string} */
-export const STORES = Object.freeze({
+export const STORES = deepFreeze({
   TASKS: 'tasks',
   DAILY_LOGS: 'daily_logs',
   SYSTEM_METADATA: 'system_metadata',
@@ -29,7 +34,7 @@ export const STORES = Object.freeze({
 });
 
 /** Índices declarados por store. @enum {Object.<string,string>} */
-export const INDICES = Object.freeze({
+export const INDICES = deepFreeze({
   [STORES.TASKS]: Object.freeze({
     idx_section: 'sectionId',
     idx_order: 'order',
@@ -41,14 +46,14 @@ export const INDICES = Object.freeze({
 });
 
 /** Claves obligatorias del store `system_metadata`. @enum {string} */
-export const META_KEYS = Object.freeze({
+export const META_KEYS = deepFreeze({
   STREAK_STATE: 'streak_state',
   USER_PREFERENCES: 'user_preferences',
   SCHEMA_VERSION: 'schema_version',
 });
 
 /** Claves usadas en `localStorage` (fallback y migración desde la v1). @enum {string} */
-export const LS_KEYS = Object.freeze({
+export const LS_KEYS = deepFreeze({
   /** Estado monolítico de la arquitectura v1. */
   LEGACY_APP_STATE: 'APP_STATE_V1',
   /** Prefijo del adaptador de respaldo `localStorageService`. */
@@ -56,7 +61,7 @@ export const LS_KEYS = Object.freeze({
 });
 
 /** Identificador del caché del Service Worker (sincronizado manualmente con `public/sw.js`). */
-export const CACHE_NAME = 'routine-tracker-v3';
+export const CACHE_NAME = 'routine-tracker-v4';
 
 /* ------------------------------------------------------------------ *
  * Dominio
@@ -70,7 +75,7 @@ export const CACHE_NAME = 'routine-tracker-v3';
  */
 
 /** Resultado de la evaluación de un día cerrado. @enum {string} */
-export const DAY_OUTCOME = Object.freeze({
+export const DAY_OUTCOME = deepFreeze({
   /** r >= THRESHOLD_SUCCESS — el día extiende la racha. */
   SUCCESS: 'SUCCESS',
   /** THRESHOLD_PARTIAL <= r < THRESHOLD_SUCCESS — la racha se conserva sin incrementarse. */
@@ -82,7 +87,7 @@ export const DAY_OUTCOME = Object.freeze({
 });
 
 /** Transiciones aplicadas por el calculador de rachas. @enum {string} */
-export const STREAK_TRANSITION = Object.freeze({
+export const STREAK_TRANSITION = deepFreeze({
   EXTENDED: 'EXTENDED',
   PRESERVED_PARTIAL: 'PRESERVED_PARTIAL',
   PRESERVED_BY_SHIELD: 'PRESERVED_BY_SHIELD',
@@ -91,7 +96,7 @@ export const STREAK_TRANSITION = Object.freeze({
 });
 
 /** Estados del `dayResetService`. @enum {string} */
-export const RESET_STATE = Object.freeze({
+export const RESET_STATE = deepFreeze({
   IDLE: 'IDLE',
   SCHEDULED: 'SCHEDULED',
   EVALUATING: 'EVALUATING',
@@ -105,7 +110,7 @@ export const RESET_STATE = Object.freeze({
  * Parámetros del algoritmo de racha resiliente
  * ------------------------------------------------------------------ */
 
-export const STREAK_CONFIG = Object.freeze({
+export const STREAK_CONFIG = deepFreeze({
   /** τ_success — ratio mínimo para considerar el día exitoso. */
   THRESHOLD_SUCCESS: 0.8,
   /** τ_partial — ratio mínimo para conservar la racha sin extenderla. */
@@ -121,7 +126,7 @@ export const STREAK_CONFIG = Object.freeze({
 });
 
 /** Preferencias por defecto (`system_metadata.user_preferences`). */
-export const DEFAULT_PREFERENCES = Object.freeze({
+export const DEFAULT_PREFERENCES = deepFreeze({
   hapticsEnabled: true,
   wakeLockEnabled: false,
   theme: 'system', // 'system' | 'light' | 'dark'
@@ -130,7 +135,7 @@ export const DEFAULT_PREFERENCES = Object.freeze({
 });
 
 /** Estado inicial de racha. */
-export const INITIAL_STREAK_STATE = Object.freeze({
+export const INITIAL_STREAK_STATE = deepFreeze({
   currentStreak: 0,
   bestStreak: 0,
   shieldsAvailable: 0,
@@ -143,7 +148,7 @@ export const INITIAL_STREAK_STATE = Object.freeze({
  * UI / interacción
  * ------------------------------------------------------------------ */
 
-export const GESTURE_CONFIG = Object.freeze({
+export const GESTURE_CONFIG = deepFreeze({
   /** Desplazamiento en px a partir del cual el gesto deja de ser un tap. */
   TAP_SLOP: 8,
   /** Desplazamiento horizontal mínimo para entrar en estado PANNING. */
@@ -161,7 +166,7 @@ export const GESTURE_CONFIG = Object.freeze({
 });
 
 /** Parámetros de la hoja deslizante inferior. */
-export const SHEET_CONFIG = Object.freeze({
+export const SHEET_CONFIG = deepFreeze({
   /** Fracción de la altura de la hoja que confirma el cierre por arrastre. */
   DISMISS_RATIO: 0.3,
   /** Velocidad (px/ms) que cierra la hoja aunque no se alcance DISMISS_RATIO. */
@@ -175,7 +180,7 @@ export const SHEET_CONFIG = Object.freeze({
 });
 
 /** Patrones de vibración (Vibration API). @enum {Array<number>|number} */
-export const HAPTIC_PATTERNS = Object.freeze({
+export const HAPTIC_PATTERNS = deepFreeze({
   TAP: 10,
   COMPLETE: [12, 40, 22],
   UNDO: 8,
@@ -185,7 +190,7 @@ export const HAPTIC_PATTERNS = Object.freeze({
 });
 
 /** Eventos del bus de aplicación. @enum {string} */
-export const EVENTS = Object.freeze({
+export const EVENTS = deepFreeze({
   READY: 'app:ready',
   STATE_CHANGED: 'state:changed',
   TASK_TOGGLED: 'task:toggled',
@@ -203,8 +208,10 @@ export const EVENTS = Object.freeze({
 });
 
 /** Máximos de validación del modelo de datos. */
-export const LIMITS = Object.freeze({
+export const LIMITS = deepFreeze({
   TASK_TITLE_MAX: 80,
+  /** Tope de un archivo de backup al importar: evita colgar el hilo en `JSON.parse`. */
+  BACKUP_MAX_BYTES: 10 * 1024 * 1024,
   TASK_MINUTES_MAX: 24 * 60,
   HEATMAP_WEEKS: 20,
   /**

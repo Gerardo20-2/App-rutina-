@@ -24,7 +24,7 @@ import { createSettingsPanel } from './components/settingsPanel.js';
 import { createBottomSheet } from './components/bottomSheet.js';
 import { createBottomBar } from './components/bottomBar.js';
 import { createToaster } from './components/toast.js';
-import { EVENTS, STREAK_TRANSITION } from '../core/constants.js';
+import { EVENTS, STREAK_TRANSITION, LIMITS } from '../core/constants.js';
 import { TimeBlockWatcher, FALLBACK_BLOCK_ID } from '../domain/timeBlockService.js';
 
 /**
@@ -75,8 +75,8 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
       const preferences = await service.setPreferences(patch);
       applyPreferences(preferences);
     }),
-    onExport: () => void run(exportBackup),
-    onImport: (file) => void run(() => importBackup(file)),
+    onExport: (passphrase) => void run(() => exportBackup(passphrase)),
+    onImport: (file, passphrase) => void run(() => importBackup(file, passphrase)),
     onWipe: () => {
       if (!confirm('Se borrarán todas las tareas y el historial. Esta acción no se puede deshacer.')) return;
       void run(async () => {
@@ -226,26 +226,38 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
     else documentRoot.dataset.theme = preferences.theme;
   }
 
-  async function exportBackup() {
-    const dump = await service.exportBackup();
-    const blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' });
+  /** @param {string} passphrase */
+  async function exportBackup(passphrase) {
+    const envelope = await service.exportBackup(passphrase);
+    settings.clearPassphrase();
+    const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
-    const link = h('a', { href: url, download: `routine-tracker-${store.getState().today}.json` });
+    const link = h('a', {
+      href: url, rel: 'noopener noreferrer',
+      download: `routine-tracker-${store.getState().today}.encrypted.json`,
+    });
     document.body.appendChild(link);
     link.click();
     link.remove();
     // Revocar de inmediato cancela la descarga en algunos navegadores.
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    bus.emit(EVENTS.TOAST, { message: 'Copia de seguridad descargada', tone: 'success' });
+    bus.emit(EVENTS.TOAST, { message: 'Copia cifrada descargada', tone: 'success' });
   }
 
-  /** @param {File} file */
-  async function importBackup(file) {
+  /**
+   * @param {File} file
+   * @param {string} passphrase
+   */
+  async function importBackup(file, passphrase) {
+    // Un backup legítimo pesa unos pocos cientos de KB: un archivo enorme sólo
+    // serviría para colgar el hilo principal en `JSON.parse`.
+    if (file.size > LIMITS.BACKUP_MAX_BYTES) throw new Error('El archivo es demasiado grande para ser una copia');
     const text = await file.text();
-    const result = await service.importBackup(text);
+    const result = await service.importBackup(text, { passphrase });
+    settings.clearPassphrase();
     settingsSheet.close();
     bus.emit(EVENTS.TOAST, {
-      message: `Importado: ${result.tasks} tareas y ${result.logs} días`,
+      message: `Importado${result.encrypted ? ' (cifrado)' : ''}: ${result.tasks} tareas y ${result.logs} días`,
       tone: 'success',
     });
   }

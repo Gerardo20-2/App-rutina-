@@ -13,12 +13,15 @@
  *                     sin red la app abre igual.
  *   · Estáticos     → stale-while-revalidate. Se sirve del caché al instante y
  *                     se refresca en segundo plano para el siguiente arranque.
- *   · Resto / cross-origin → passthrough, sin tocar el caché.
+ *   · Cross-origin   → rechazada con error de red. La app no depende de
+ *                     ningún tercero: una petición a otro origen sólo puede
+ *                     venir de código inyectado o de una extensión, y el
+ *                     worker no la sirve ni la cachea.
  */
 
 /* eslint-env serviceworker */
 
-const CACHE_NAME = 'routine-tracker-v3';
+const CACHE_NAME = 'routine-tracker-v4';
 const NAVIGATION_TIMEOUT_MS = 3000;
 
 /**
@@ -60,6 +63,8 @@ const ASSETS_TO_CACHE = [
   './src/storage/localStorageService.js',
   './src/storage/repository.js',
   './src/storage/seedData.js',
+  './src/security/cryptoService.js',
+  './src/security/objectGuard.js',
   './src/platform/gestures.js',
   './src/platform/haptics.js',
   './src/platform/wakeLock.js',
@@ -116,10 +121,17 @@ self.addEventListener('message', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const { request } = event;
+  // Sin backend, nada legítimo envía POST/PUT: se deja al navegador (y a la CSP).
   if (request.method !== 'GET') return;
 
   const url = new URL(request.url);
-  if (url.origin !== self.location.origin) return;
+  if (url.origin !== self.location.origin) {
+    // Las navegaciones a otro sitio (un enlace que el usuario pulsa) no
+    // llegan aquí: están fuera del alcance del worker. Lo que sí llega es un
+    // subrecurso cruzado, y ninguno es legítimo en esta app.
+    event.respondWith(Response.error());
+    return;
+  }
   // Fuera del alcance de la app (otra PWA en el mismo dominio de Pages) no
   // es asunto de este worker.
   if (!url.href.startsWith(APP_SCOPE)) return;
@@ -142,11 +154,11 @@ async function handleNavigation(event) {
   try {
     const preloaded = await event.preloadResponse;
     if (preloaded) {
-      void cache.put(scoped('./index.html'), preloaded.clone());
+      if (isCacheable(preloaded)) void cache.put(scoped('./index.html'), preloaded.clone());
       return preloaded;
     }
     const response = await withTimeout(fetch(event.request), NAVIGATION_TIMEOUT_MS);
-    if (response && response.ok) {
+    if (isCacheable(response)) {
       void cache.put(scoped('./index.html'), response.clone());
     }
     return response;
@@ -171,7 +183,7 @@ async function staleWhileRevalidate(request) {
   const network = fetch(request).then((response) => {
     // Las respuestas opacas y los errores no se cachean: envenenarían el
     // caché con contenido que no podemos validar.
-    if (response && response.ok && response.type === 'basic') {
+    if (isCacheable(response)) {
       void cache.put(request, response.clone());
     }
     return response;
@@ -183,6 +195,20 @@ async function staleWhileRevalidate(request) {
   }
   const response = await network;
   return response ?? new Response('', { status: 504, statusText: 'Sin conexión' });
+}
+
+/**
+ * Sólo se cachean respuestas propias y completas: `basic` garantiza mismo
+ * origen, y una redirección podría haber terminado en otro sitio.
+ * @param {Response|null|undefined} response
+ */
+function isCacheable(response) {
+  if (!response || !response.ok || response.type !== 'basic' || response.redirected) return false;
+  try {
+    return new URL(response.url).origin === self.location.origin;
+  } catch {
+    return false;
+  }
 }
 
 /**

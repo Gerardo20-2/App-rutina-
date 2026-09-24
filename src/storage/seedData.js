@@ -11,8 +11,10 @@
  * están presentes, y `isArchived`/`createdAt` toman sus valores por defecto.
  */
 
+import { deepFreeze } from '../security/objectGuard.js';
+
 /** @type {ReadonlyArray<Partial<import('../domain/taskValidator.js').TaskDefinition>>} */
-export const INITIAL_TASKS = Object.freeze([
+export const INITIAL_TASKS = deepFreeze([
   // --- MADRUGADA / MAÑANA (Lunes a Viernes) ---
   {
     id: 'task-wake-up',

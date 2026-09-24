@@ -217,17 +217,22 @@ export class RoutineService {
     return preferences;
   }
 
-  /** @returns {Promise<Object>} */
-  async exportBackup() {
-    return this._repository.exportBackup();
+  /**
+   * Backup cifrado con AES-GCM a partir de la frase de paso del usuario.
+   * @param {string} passphrase
+   * @returns {Promise<import('../security/cryptoService.js').EncryptedEnvelope>}
+   */
+  async exportBackup(passphrase) {
+    return this._repository.exportEncryptedBackup(passphrase);
   }
 
   /**
-   * @param {string|Object} payload
-   * @returns {Promise<{tasks:number, logs:number}>}
+   * @param {string|Object} payload sobre cifrado o volcado en claro heredado.
+   * @param {{passphrase?: string}} [options]
+   * @returns {Promise<{tasks:number, logs:number, encrypted:boolean}>}
    */
-  async importBackup(payload) {
-    const result = await this._repository.importBackup(payload);
+  async importBackup(payload, options = {}) {
+    const result = await this._repository.importBackup(payload, options);
     await this.hydrate();
     return result;
   }
