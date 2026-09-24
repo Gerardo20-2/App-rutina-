@@ -223,3 +223,24 @@ button {
     scroll-behavior: auto !important;
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * Pantalla de privacidad (src/security/privacyShield.js)
+ * La miniatura del selector de apps sale negra y la agenda desenfocada.
+ * ------------------------------------------------------------------ */
+#privacy-shield {
+  position: fixed;
+  inset: 0;
+  background: #000000;
+  z-index: 2147483647;
+  pointer-events: all;
+  display: none;
+}
+
+html[data-privacy-shield] #privacy-shield {
+  display: block;
+}
+
+html[data-privacy-shield] #app {
+  filter: blur(25px);
+}

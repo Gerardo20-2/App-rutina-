@@ -115,6 +115,26 @@ export class StorageAdapter {
     throw new StorageError('importAll() no implementado', { code: 'NOT_IMPLEMENTED' });
   }
 
+  /**
+   * ¿Puede guardar objetos `CryptoKey` con la misma vida que los datos? Sin
+   * esa garantía la integridad HMAC se desactiva: una clave que se pierde al
+   * recargar convertiría cada registro legítimo en «manipulado».
+   * @returns {boolean}
+   */
+  get supportsSecrets() {
+    return false;
+  }
+
+  /** @param {string} name @returns {Promise<CryptoKey|undefined>} */
+  async getSecret(name) { // eslint-disable-line no-unused-vars
+    throw new StorageError('getSecret() no implementado', { code: 'NOT_IMPLEMENTED' });
+  }
+
+  /** @param {string} name @param {CryptoKey} key @returns {Promise<void>} */
+  async putSecret(name, key) { // eslint-disable-line no-unused-vars
+    throw new StorageError('putSecret() no implementado', { code: 'NOT_IMPLEMENTED' });
+  }
+
   /** Cierra recursos abiertos. @returns {Promise<void>} */
   async close() {}
 }

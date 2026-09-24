@@ -20,6 +20,8 @@ import {
   FALLBACK_BLOCK_ID,
 } from './timeBlockService.js';
 import { INITIAL_TASKS } from '../storage/seedData.js';
+import { AttemptLimiter } from '../security/rateLimiter.js';
+import { wipeBuffer } from '../security/cryptoService.js';
 
 export { INITIAL_TASKS as SEED_TASKS };
 
@@ -30,13 +32,16 @@ export class RoutineService {
    *   store: import('../core/store.js').Store,
    *   bus: import('../core/events.js').EventBus,
    *   now?: () => Date,
+   *   limiter?: AttemptLimiter,
    * }} deps
    */
-  constructor({ repository, store, bus, now = () => new Date() }) {
+  constructor({ repository, store, bus, now = () => new Date(), limiter = new AttemptLimiter() }) {
     this._repository = repository;
     this._store = store;
     this._bus = bus;
     this._now = now;
+    /** Freno a los intentos fallidos de descifrado de copias. */
+    this.importLimiter = limiter;
   }
 
   /**
@@ -219,7 +224,7 @@ export class RoutineService {
 
   /**
    * Backup cifrado con AES-GCM a partir de la frase de paso del usuario.
-   * @param {string} passphrase
+   * @param {string|Uint8Array} passphrase se pone a cero al terminar si es un buffer.
    * @returns {Promise<import('../security/cryptoService.js').EncryptedEnvelope>}
    */
   async exportBackup(passphrase) {
@@ -227,12 +232,21 @@ export class RoutineService {
   }
 
   /**
+   * Pasa por el freno de intentos: tras varios fallos seguidos, los intentos
+   * se retrasan y después se bloquean (ver `security/rateLimiter.js`).
    * @param {string|Object} payload sobre cifrado o volcado en claro heredado.
-   * @param {{passphrase?: string}} [options]
+   * @param {{passphrase?: string|Uint8Array}} [options]
    * @returns {Promise<{tasks:number, logs:number, encrypted:boolean}>}
+   * @throws {import('../security/rateLimiter.js').RateLimitError} durante un bloqueo.
    */
   async importBackup(payload, options = {}) {
-    const result = await this._repository.importBackup(payload, options);
+    let result;
+    try {
+      result = await this.importLimiter.run(() => this._repository.importBackup(payload, options));
+    } finally {
+      // Si el bloqueo impidió el intento, la frase no llegó a consumirse.
+      if (options.passphrase instanceof Uint8Array) wipeBuffer(options.passphrase);
+    }
     await this.hydrate();
     return result;
   }

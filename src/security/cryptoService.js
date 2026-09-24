@@ -19,6 +19,16 @@
  * 100 000 iteraciones del KDF. Ojo: un SHA-256 sin clave lo puede recalcular
  * cualquiera; la garantía criptográfica de integridad la da la etiqueta GCM,
  * que sin la frase de paso no se puede falsificar.
+ *
+ * ## Higiene de memoria
+ *
+ * Las frases de paso se aceptan como `Uint8Array` y el servicio **se queda
+ * con ellas**: las pone a cero (`wipeBuffer`) en un `finally` en cuanto
+ * termina, falle o no. Lo mismo con el texto en claro serializado y con el
+ * descifrado. Límites honestos: un `string` de JavaScript es inmutable y no se
+ * puede borrar (por eso la UI convierte a bytes lo antes posible), el
+ * recolector puede haber copiado un buffer antes de ponerlo a cero, y la
+ * `CryptoKey` derivada es opaca y no exportable: vive dentro del motor.
  */
 
 import { safeJsonParse } from './objectGuard.js';
@@ -78,9 +88,48 @@ export function randomBytes(length) {
   return globalThis.crypto.getRandomValues(new Uint8Array(length));
 }
 
-/** @param {string} passphrase */
+/**
+ * Sobrescribe un buffer con ceros. No-op para cualquier otra cosa.
+ * @param {Uint8Array|ArrayBuffer|null|undefined} buf
+ */
+export function wipeBuffer(buf) {
+  if (buf instanceof ArrayBuffer) {
+    new Uint8Array(buf).fill(0);
+  } else if (buf && typeof buf.fill === 'function') {
+    buf.fill(0);
+  }
+}
+
+/**
+ * Frase de paso → bytes UTF-8 en NFC. Un `Uint8Array` se usa tal cual (ya
+ * normalizado por quien lo creó); un `string` se codifica en un buffer nuevo.
+ * En ambos casos el resultado pertenece al llamador, que debe borrarlo.
+ * @param {string|Uint8Array} passphrase
+ * @returns {Uint8Array}
+ */
+export function passphraseToBytes(passphrase) {
+  if (passphrase instanceof Uint8Array) return passphrase;
+  if (typeof passphrase === 'string') return encoder.encode(passphrase.normalize('NFC'));
+  return new Uint8Array(0);
+}
+
+/**
+ * Número de caracteres (code points) de un texto UTF-8 sin decodificarlo:
+ * cuenta los bytes que no son de continuación (`10xxxxxx`).
+ * @param {Uint8Array} bytes
+ */
+function codePointLength(bytes) {
+  let count = 0;
+  for (const byte of bytes) if ((byte & 0xc0) !== 0x80) count += 1;
+  return count;
+}
+
+/** @param {string|Uint8Array} passphrase */
 export function assertPassphrase(passphrase) {
-  if (typeof passphrase !== 'string' || [...passphrase].length < CRYPTO_CONFIG.PASSPHRASE_MIN) {
+  const length = passphrase instanceof Uint8Array
+    ? codePointLength(passphrase)
+    : (typeof passphrase === 'string' ? [...passphrase].length : 0);
+  if (length < CRYPTO_CONFIG.PASSPHRASE_MIN) {
     throw new CryptoError(
       `La frase de paso necesita al menos ${CRYPTO_CONFIG.PASSPHRASE_MIN} caracteres`,
       { code: 'WEAK_PASSPHRASE' },
@@ -89,8 +138,9 @@ export function assertPassphrase(passphrase) {
 }
 
 /**
- * PBKDF2 → clave AES-GCM no exportable.
- * @param {string} passphrase
+ * PBKDF2 → clave AES-GCM no exportable. No borra `passphrase`: eso es cosa de
+ * quien la posee (`encryptJson`/`decryptJson` lo hacen en su `finally`).
+ * @param {string|Uint8Array} passphrase
  * @param {Uint8Array} salt
  * @param {number} [iterations]
  * @returns {Promise<CryptoKey>}
@@ -98,9 +148,15 @@ export function assertPassphrase(passphrase) {
 export async function deriveKey(passphrase, salt, iterations = CRYPTO_CONFIG.ITERATIONS) {
   const api = subtle();
   // NFC: la misma frase tecleada en dos teclados debe producir la misma clave.
-  const material = await api.importKey(
-    'raw', encoder.encode(passphrase.normalize('NFC')), 'PBKDF2', false, ['deriveKey'],
-  );
+  const bytes = passphraseToBytes(passphrase);
+  let material;
+  try {
+    // `importKey` copia los bytes dentro del motor: el buffer propio ya se
+    // puede borrar en cuanto resuelve.
+    material = await api.importKey('raw', bytes, 'PBKDF2', false, ['deriveKey']);
+  } finally {
+    if (bytes !== passphrase) wipeBuffer(bytes);
+  }
   return api.deriveKey(
     { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
     material,
@@ -122,75 +178,90 @@ export async function sha256Hex(data) {
 }
 
 /**
- * Cifra cualquier valor serializable a JSON.
+ * Cifra cualquier valor serializable a JSON. Si `passphrase` es un
+ * `Uint8Array`, queda a cero al terminar.
  * @param {*} value
- * @param {string} passphrase
+ * @param {string|Uint8Array} passphrase
  * @returns {Promise<EncryptedEnvelope>}
  */
 export async function encryptJson(value, passphrase) {
-  assertPassphrase(passphrase);
-  const salt = randomBytes(CRYPTO_CONFIG.SALT_BYTES);
-  const iv = randomBytes(CRYPTO_CONFIG.IV_BYTES);
-  const header = {
-    format: ENVELOPE_FORMAT,
-    version: ENVELOPE_VERSION,
-    kdf: CRYPTO_CONFIG.KDF,
-    iterations: CRYPTO_CONFIG.ITERATIONS,
-    cipher: CRYPTO_CONFIG.CIPHER,
-    salt: toBase64(salt),
-    iv: toBase64(iv),
-  };
-  const key = await deriveKey(passphrase, salt, header.iterations);
-  const ciphertext = new Uint8Array(await subtle().encrypt(
-    { name: 'AES-GCM', iv, additionalData: encoder.encode(headerString(header)) },
-    key,
-    encoder.encode(JSON.stringify(value)),
-  ));
-  const envelope = { ...header, ciphertext: toBase64(ciphertext) };
-  return { ...envelope, checksum: await checksumOf(envelope) };
+  let plain = null;
+  try {
+    assertPassphrase(passphrase);
+    const salt = randomBytes(CRYPTO_CONFIG.SALT_BYTES);
+    const iv = randomBytes(CRYPTO_CONFIG.IV_BYTES);
+    const header = {
+      format: ENVELOPE_FORMAT,
+      version: ENVELOPE_VERSION,
+      kdf: CRYPTO_CONFIG.KDF,
+      iterations: CRYPTO_CONFIG.ITERATIONS,
+      cipher: CRYPTO_CONFIG.CIPHER,
+      salt: toBase64(salt),
+      iv: toBase64(iv),
+    };
+    const key = await deriveKey(passphrase, salt, header.iterations);
+    plain = encoder.encode(JSON.stringify(value));
+    const ciphertext = new Uint8Array(await subtle().encrypt(
+      { name: 'AES-GCM', iv, additionalData: encoder.encode(headerString(header)) },
+      key,
+      plain,
+    ));
+    const envelope = { ...header, ciphertext: toBase64(ciphertext) };
+    return { ...envelope, checksum: await checksumOf(envelope) };
+  } finally {
+    wipeBuffer(plain);
+    wipeBuffer(passphrase instanceof Uint8Array ? passphrase : null);
+  }
 }
 
 /**
  * Verifica el checksum y descifra. Falla con {@link CryptoError} ante una
  * frase incorrecta, un sobre alterado o datos corruptos; nunca devuelve basura.
+ * Si `passphrase` es un `Uint8Array`, queda a cero al terminar, también si falla.
  * @param {EncryptedEnvelope|string} input sobre (objeto o JSON).
- * @param {string} passphrase
+ * @param {string|Uint8Array} passphrase
  * @returns {Promise<*>} el valor original, parseado sin claves peligrosas.
  */
 export async function decryptJson(input, passphrase) {
-  const envelope = parseEnvelope(input);
-
-  const expected = await checksumOf(envelope);
-  if (expected !== envelope.checksum) {
-    throw new CryptoError('El archivo está dañado o ha sido modificado (checksum SHA-256)', {
-      code: 'CHECKSUM_MISMATCH',
-    });
-  }
-
-  if (typeof passphrase !== 'string' || passphrase.length === 0) {
-    throw new CryptoError('Falta la frase de paso', { code: 'WEAK_PASSPHRASE' });
-  }
-
-  const salt = fromBase64(envelope.salt);
-  const iv = fromBase64(envelope.iv);
-  const key = await deriveKey(passphrase, salt, envelope.iterations);
-  let plain;
+  /** @type {Uint8Array|null} */
+  let plain = null;
   try {
-    plain = await subtle().decrypt(
-      { name: 'AES-GCM', iv, additionalData: encoder.encode(headerString(envelope)) },
-      key,
-      fromBase64(envelope.ciphertext),
-    );
-  } catch (error) {
-    // AES-GCM no distingue entre clave errónea y texto alterado, y no debe:
-    // cualquier pista sobre cuál de los dos falló ayuda a un atacante.
-    throw new CryptoError('Frase de paso incorrecta o archivo alterado', { code: 'DECRYPT_FAILED', cause: error });
-  }
+    const envelope = parseEnvelope(input);
 
-  try {
-    return safeJsonParse(decoder.decode(plain));
-  } catch (error) {
-    throw new CryptoError('El contenido descifrado no es JSON válido', { code: 'BAD_ENVELOPE', cause: error });
+    const expected = await checksumOf(envelope);
+    if (expected !== envelope.checksum) {
+      throw new CryptoError('El archivo está dañado o ha sido modificado (checksum SHA-256)', {
+        code: 'CHECKSUM_MISMATCH',
+      });
+    }
+
+    if (passphraseToBytes(passphrase).length === 0) {
+      throw new CryptoError('Falta la frase de paso', { code: 'WEAK_PASSPHRASE' });
+    }
+
+    const salt = fromBase64(envelope.salt);
+    const iv = fromBase64(envelope.iv);
+    const key = await deriveKey(passphrase, salt, envelope.iterations);
+    try {
+      plain = new Uint8Array(await subtle().decrypt(
+        { name: 'AES-GCM', iv, additionalData: encoder.encode(headerString(envelope)) },
+        key,
+        fromBase64(envelope.ciphertext),
+      ));
+    } catch (error) {
+      // AES-GCM no distingue entre clave errónea y texto alterado, y no debe:
+      // cualquier pista sobre cuál de los dos falló ayuda a un atacante.
+      throw new CryptoError('Frase de paso incorrecta o archivo alterado', { code: 'DECRYPT_FAILED', cause: error });
+    }
+
+    try {
+      return safeJsonParse(decoder.decode(plain));
+    } catch (error) {
+      throw new CryptoError('El contenido descifrado no es JSON válido', { code: 'BAD_ENVELOPE', cause: error });
+    }
+  } finally {
+    wipeBuffer(plain);
+    wipeBuffer(passphrase instanceof Uint8Array ? passphrase : null);
   }
 }
 

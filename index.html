@@ -8,6 +8,9 @@
        admite meta etiqueta y GitHub Pages no permite cabeceras propias. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; manifest-src 'self'; connect-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
   <meta name="referrer" content="no-referrer">
+  <!-- Anti-clickjacking: script clásico y síncrono, lo primero que se ejecuta.
+       No va en línea porque la CSP no admite scripts inline. -->
+  <script src="./src/security/frameGuard.js"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>RoutineTracker — rutina diaria offline</title>
   <meta name="description" content="Seguimiento de rutinas diarias offline-first: tus tareas, tus rachas y tu historial, guardados sólo en tu dispositivo.">

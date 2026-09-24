@@ -5,14 +5,16 @@
  * Secuencia de arranque:
  *   1. Abrir la persistencia (IndexedDB → localStorage → memoria).
  *   2. Hidratar el store y montar la interfaz (primer pintado útil).
- *   3. Comprobar el corte de medianoche (la app pudo quedar abierta días).
+ *   3. Auditar las firmas HMAC y comprobar el corte de medianoche (la app
+ *      pudo quedar abierta días).
  *   4. Registrar el Service Worker — deliberadamente al final: la caché no
  *      debe competir por ancho de banda con el primer render.
  */
 
 import { store } from './core/store.js';
 import { bus } from './core/events.js';
-import { EVENTS } from './core/constants.js';
+import { EVENTS, SECURITY_CONFIG } from './core/constants.js';
+import { toDateKey } from './core/dateUtils.js';
 import { repository } from './storage/repository.js';
 import { RoutineService } from './domain/routineService.js';
 import { DayResetService } from './domain/dayResetService.js';
@@ -27,11 +29,23 @@ async function bootstrap() {
 
   await repository.open();
 
+  // Auditoría de firmas de los últimos 30 días ANTES de hidratar: así el
+  // estado que llega a la interfaz ya lleva las marcas `unverified` y la
+  // racha, si estaba inflada, ya viene reconstruida.
+  const integrityReport = await repository.auditIntegrity({
+    days: SECURITY_CONFIG.INTEGRITY_AUDIT_DAYS,
+    today: toDateKey(),
+  });
+
   const service = new RoutineService({ repository, store, bus });
   await service.hydrate();
 
   const renderer = createRenderer({ root, store, bus, service, haptics, wakeLock });
   renderer.mount();
+  if (integrityReport.status === 'tampered') {
+    console.warn('[main] integridad: registros manipulados', integrityReport);
+    bus.emit(EVENTS.INTEGRITY_VIOLATION, { ...integrityReport, reason: 'bootstrap' });
+  }
 
   const dayReset = new DayResetService({ repository, store, bus });
   // Se comprueba ANTES de arrancar el temporizador: si la app estuvo cerrada

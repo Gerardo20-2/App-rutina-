@@ -21,14 +21,17 @@ export const DB_NAME = 'routine_tracker_db';
  * @type {number} Versión del esquema IndexedDB.
  *   v2 — tasks + daily_logs + system_metadata con bloques genéricos.
  *   v3 — bloques horarios por día: `sectionId`, `daysOfWeek`, `timeStart/End`, `isAnchor`.
+ *   v4 — store `security_keys` con la clave HMAC de integridad (no exportable).
  */
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 
 /** Nombres de object stores. @enum {string} */
 export const STORES = deepFreeze({
   TASKS: 'tasks',
   DAILY_LOGS: 'daily_logs',
   SYSTEM_METADATA: 'system_metadata',
+  /** Claves criptográficas del dispositivo (`CryptoKey` no exportables). Nunca se exporta. */
+  SECURITY_KEYS: 'security_keys',
   /** Store legado de la v1, se lee sólo durante la migración. */
   LEGACY_APP_STATE: 'app_state',
 });
@@ -61,7 +64,7 @@ export const LS_KEYS = deepFreeze({
 });
 
 /** Identificador del caché del Service Worker (sincronizado manualmente con `public/sw.js`). */
-export const CACHE_NAME = 'routine-tracker-v4';
+export const CACHE_NAME = 'routine-tracker-v5';
 
 /* ------------------------------------------------------------------ *
  * Dominio
@@ -205,6 +208,25 @@ export const EVENTS = deepFreeze({
   ERROR: 'app:error',
   SECTION_TOGGLED: 'ui:section-toggled',
   CLOCK_DESYNC: 'app:clock-desync',
+  INTEGRITY_VIOLATION: 'security:integrity-violation',
+});
+
+/** Parámetros de las defensas client-side (`src/security/`). */
+export const SECURITY_CONFIG = deepFreeze({
+  /** Días hacia atrás cuya firma HMAC se audita en el arranque y a medianoche. */
+  INTEGRITY_AUDIT_DAYS: 30,
+  /** Suelo de tiempo de toda respuesta fallida de importación (ms). */
+  FAILURE_FLOOR_MS: 750,
+  /** Retardo tras los fallos 1 a 3 (ms). */
+  SOFT_DELAY_MS: 500,
+  /** Bloqueo tras el 4.º fallo (ms). */
+  LOCK_4_MS: 5_000,
+  /** Bloqueo tras el 5.º fallo; a partir del 6.º se duplica (ms). */
+  LOCK_5_MS: 30_000,
+  /** Techo del bloqueo: 24 h (también mantiene el valor dentro de `setTimeout`). */
+  LOCK_MAX_MS: 24 * 60 * 60 * 1000,
+  /** Jitter aleatorio máximo sumado a cada retardo (ms). */
+  JITTER_MS: 250,
 });
 
 /** Máximos de validación del modelo de datos. */

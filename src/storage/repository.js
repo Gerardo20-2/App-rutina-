@@ -22,8 +22,9 @@ import {
   DB_VERSION,
   DEFAULT_PREFERENCES,
   INITIAL_STREAK_STATE,
+  STREAK_CONFIG,
 } from '../core/constants.js';
-import { BLOCK_IDS, FALLBACK_BLOCK_ID, isBlockId } from '../domain/timeBlockService.js';
+import { BLOCK_IDS, FALLBACK_BLOCK_ID, isBlockId, countTasksForDay } from '../domain/timeBlockService.js';
 import {
   validateTask,
   validateDailyLog,
@@ -36,10 +37,18 @@ import {
 } from '../domain/taskValidator.js';
 import { toDateKey, isDateKey, addDays, parseTime } from '../core/dateUtils.js';
 import { safeJsonParse, sanitizeDeep } from '../security/objectGuard.js';
-import { encryptJson, decryptJson, isEncryptedEnvelope } from '../security/cryptoService.js';
+import { encryptJson, decryptJson, isEncryptedEnvelope, wipeBuffer } from '../security/cryptoService.js';
+import { IntegrityService } from '../security/integrityService.js';
+import { reconcile } from '../domain/streakCalculator.js';
 
 /** Metadatos que un backup puede restaurar; cualquier otra clave se ignora. */
 const IMPORTABLE_META_KEYS = new Set(Object.values(META_KEYS));
+
+/**
+ * Marca de que los datos de este dispositivo ya se firmaron alguna vez. Fuera
+ * de `META_KEYS` a propósito: un backup no puede importarla ni borrarla.
+ */
+const INTEGRITY_META_KEY = 'integrity_state';
 
 export class Repository {
   /** @param {{adapter?: import('./storageAdapter.js').StorageAdapter}} [options] */
@@ -48,7 +57,9 @@ export class Repository {
     this._adapter = options.adapter ?? null;
     this._opened = false;
     /** @type {{legacyMigrated: boolean, upgraded: {from:number,to:number}|null, schemaMigrated: Object|null}} */
-    this.diagnostics = { legacyMigrated: false, upgraded: null, schemaMigrated: null };
+    this.diagnostics = { legacyMigrated: false, upgraded: null, schemaMigrated: null, integrity: 'off' };
+    /** @type {IntegrityService|null} */
+    this._integrity = null;
   }
 
   /** @returns {string} motor efectivo. */
@@ -94,7 +105,148 @@ export class Repository {
     await this._ensureMetadata();
     await this.migrateSchema(storedVersion);
     await this.migrateLegacy();
+    await this._initIntegrity();
     return this;
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Integridad HMAC (security/integrityService.js)
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Carga o crea la clave HMAC del dispositivo.
+   *
+   *  - Primera clave en un dispositivo sin datos firmados (instalación nueva o
+   *    actualización desde la v3): se confía en lo que hay y se firma todo
+   *    (*trust on first use*).
+   *  - Clave nueva en un dispositivo que YA tenía datos firmados: la clave
+   *    desapareció. No se re-firma nada —eso blanquearía cualquier edición—
+   *    y la auditoría marcará lo que no cuadre.
+   *  - Motor sin almacén de secretos (localStorage real): integridad desactivada.
+   */
+  async _initIntegrity() {
+    this._integrity = null;
+    if (!this._adapter.supportsSecrets || !globalThis.crypto?.subtle) {
+      this.diagnostics.integrity = 'unavailable';
+      return;
+    }
+    const integrity = new IntegrityService({ secrets: this._adapter });
+    let created;
+    try {
+      ({ created } = await integrity.init());
+    } catch (error) {
+      console.warn('[Repository] integridad HMAC no disponible', error);
+      this.diagnostics.integrity = 'unavailable';
+      return;
+    }
+    this._integrity = integrity;
+    const established = Boolean(await this.getMeta(INTEGRITY_META_KEY));
+
+    if (created && established) {
+      this.diagnostics.integrity = 'key-lost';
+      return;
+    }
+    if (created || this.diagnostics.legacyMigrated) await this._resignAll();
+    if (!established) await this.setMeta(INTEGRITY_META_KEY, { since: new Date().toISOString() });
+    this.diagnostics.integrity = 'active';
+  }
+
+  /** `true` si los registros se están firmando. */
+  get integrityActive() {
+    return this._integrity !== null;
+  }
+
+  /** Firma todos los logs y la racha tal y como están ahora. */
+  async _resignAll() {
+    const rows = await this._adapter.getAll(STORES.DAILY_LOGS);
+    const sealed = [];
+    for (const row of rows) {
+      try {
+        sealed.push(await this._sealLog(validateDailyLog(row)));
+      } catch {
+        // Un log inválido ya se ignora al leer: no hay nada que firmar.
+      }
+    }
+    if (sealed.length > 0) await this._adapter.bulkPut(STORES.DAILY_LOGS, sealed);
+    await this.saveStreak(await this.getStreak());
+  }
+
+  /** @param {import('../domain/taskValidator.js').DailyLog} log */
+  async _sealLog(log) {
+    if (!this._integrity) return log;
+    return { ...log, integritySig: await this._integrity.signLog(log) };
+  }
+
+  /**
+   * Verifica la firma de los logs de la ventana y la del estado de racha.
+   * Los logs que no cuadran quedan marcados `unverified: true` (de forma
+   * persistente: una firma posterior no los rehabilita). Si la racha no
+   * cuadra, se reconstruye a partir de los logs que sí verifican.
+   *
+   * @param {{days?: number, today?: string}} [options] `today` = día activo, no evaluado.
+   * @returns {Promise<{status: 'unavailable'|'ok'|'tampered', tamperedDates: string[], streakTampered: boolean}>}
+   *   `tamperedDates` sólo lista las detecciones nuevas de esta auditoría.
+   */
+  async auditIntegrity({ days = 30, today = toDateKey() } = {}) {
+    if (!this._integrity) return { status: 'unavailable', tamperedDates: [], streakTampered: false };
+
+    const from = addDays(today, -(days - 1));
+    const tamperedDates = [];
+    for (const row of await this._adapter.getAll(STORES.DAILY_LOGS, { range: { lower: from, upper: today } })) {
+      if (!isDateKey(row?.date) || row.date < from || row.date > today || row.unverified === true) continue;
+      if (!(await this._verifyRow(row))) {
+        await this._adapter.put(STORES.DAILY_LOGS, { ...row, unverified: true });
+        tamperedDates.push(row.date);
+      }
+    }
+
+    const streakRow = await this._adapter.get(STORES.SYSTEM_METADATA, META_KEYS.STREAK_STATE);
+    const streak = validateStreakState(streakRow?.value);
+    const streakTampered = !(await this._integrity.verifyStreak(streak, streakRow?.integritySig));
+    if (streakTampered) await this.saveStreak(await this.rebuildStreak(today));
+
+    return {
+      status: tamperedDates.length > 0 || streakTampered ? 'tampered' : 'ok',
+      tamperedDates,
+      streakTampered,
+    };
+  }
+
+  /** @param {*} row fila cruda de `daily_logs`. */
+  async _verifyRow(row) {
+    let log;
+    try {
+      log = validateDailyLog(row);
+    } catch {
+      return false;
+    }
+    return this._integrity.verifyLog(log, row.integritySig);
+  }
+
+  /**
+   * Recalcula la racha desde cero con los logs cuya firma verifica, igual que
+   * si la app hubiera evaluado cada día a medianoche. Los días sin log fiable
+   * cuentan como ausencia: un registro falsificado no da crédito.
+   * @param {string} today día activo (no se evalúa).
+   * @returns {Promise<import('../domain/streakCalculator.js').StreakState>}
+   */
+  async rebuildStreak(today) {
+    const from = addDays(today, -STREAK_CONFIG.MAX_RECONCILE_DAYS);
+    const rows = await this._adapter.getAll(STORES.DAILY_LOGS, { range: { lower: from, upper: addDays(today, -1) } });
+    /** @type {Object.<string, import('../domain/taskValidator.js').DailyLog>} */
+    const byDate = {};
+    for (const row of rows) {
+      if (!isDateKey(row?.date) || row.date < from || row.date >= today || row.unverified === true) continue;
+      if (this._integrity && !(await this._verifyRow(row))) continue;
+      byDate[row.date] = validateDailyLog(row);
+    }
+    const dates = Object.keys(byDate).sort();
+    const start = { ...INITIAL_STREAK_STATE, lastEvaluatedDate: addDays(dates[0] ?? today, -1) };
+    const tasks = await this.listTasks();
+    return reconcile(start, byDate, today, {
+      activeTasksFor: (date) => countTasksForDay(tasks, date),
+      config: STREAK_CONFIG,
+    }).state;
   }
 
   /**
@@ -256,7 +408,18 @@ export class Repository {
    */
   async saveLog(log) {
     const validated = validateDailyLog(log);
-    await this._adapter.put(STORES.DAILY_LOGS, validated);
+    if (this._integrity && !validated.unverified) {
+      // Nunca se re-firma como bueno un registro que ya no lo era: ni uno
+      // marcado por una auditoría anterior (la marca es pegajosa) ni uno cuya
+      // firma almacenada no cuadra. Sin esto, cualquier lectura-modificación-
+      // escritura (p. ej. `ensureLog` re-sincronizando el total al arrancar)
+      // blanquearía una edición hecha fuera de la app.
+      const stored = await this._adapter.get(STORES.DAILY_LOGS, validated.date);
+      if (stored && (stored.unverified === true || !(await this._verifyRow(stored)))) {
+        validated.unverified = true;
+      }
+    }
+    await this._adapter.put(STORES.DAILY_LOGS, await this._sealLog(validated));
     return validated;
   }
 
@@ -312,7 +475,9 @@ export class Repository {
   /** @param {import('../domain/streakCalculator.js').StreakState} state */
   async saveStreak(state) {
     const validated = validateStreakState(state);
-    await this.setMeta(META_KEYS.STREAK_STATE, validated);
+    const row = { key: META_KEYS.STREAK_STATE, value: validated, updatedAt: new Date().toISOString() };
+    if (this._integrity) row.integritySig = await this._integrity.signStreak(validated);
+    await this._adapter.put(STORES.SYSTEM_METADATA, row);
     return validated;
   }
 
@@ -334,7 +499,18 @@ export class Repository {
   /** @returns {Promise<Object>} volcado serializable, en claro. */
   async exportBackup() {
     const dump = await this._adapter.exportAll();
-    return { app: 'routine-tracker', schema: DB_VERSION, ...dump };
+    // Las firmas HMAC dependen de la clave de ESTE dispositivo: fuera de él
+    // no significan nada. Al importar se vuelve a firmar.
+    const unsealed = {};
+    for (const [store, rows] of Object.entries(dump.data ?? {})) {
+      if (store === STORES.SECURITY_KEYS) continue;
+      unsealed[store] = (Array.isArray(rows) ? rows : []).map((row) => {
+        if (!row || typeof row !== 'object') return row;
+        const { integritySig, ...rest } = row;
+        return rest;
+      });
+    }
+    return { app: 'routine-tracker', schema: DB_VERSION, ...dump, data: unsealed };
   }
 
   /**
@@ -356,17 +532,24 @@ export class Repository {
    */
   async importBackup(payload, options = {}) {
     let dump;
+    let encrypted = false;
     try {
-      dump = typeof payload === 'string' ? safeJsonParse(payload) : sanitizeDeep(payload);
-    } catch (error) {
-      throw new StorageError('El archivo no es JSON válido', { cause: error, code: 'BAD_DUMP' });
-    }
-    const encrypted = isEncryptedEnvelope(dump);
-    if (encrypted) {
-      if (!options.passphrase) {
-        throw new StorageError('Copia cifrada: hace falta la frase de paso', { code: 'PASSPHRASE_REQUIRED' });
+      try {
+        dump = typeof payload === 'string' ? safeJsonParse(payload) : sanitizeDeep(payload);
+      } catch (error) {
+        throw new StorageError('El archivo no es JSON válido', { cause: error, code: 'BAD_DUMP' });
       }
-      dump = await decryptJson(dump, options.passphrase);
+      encrypted = isEncryptedEnvelope(dump);
+      if (encrypted) {
+        const { passphrase } = options;
+        if (!passphrase || passphrase.length === 0) {
+          throw new StorageError('Copia cifrada: hace falta la frase de paso', { code: 'PASSPHRASE_REQUIRED' });
+        }
+        dump = await decryptJson(dump, passphrase);
+      }
+    } finally {
+      // La frase se consume en cualquier caso, también si no hizo falta.
+      if (options.passphrase instanceof Uint8Array) wipeBuffer(options.passphrase);
     }
     if (!dump?.data || typeof dump.data !== 'object' || Array.isArray(dump.data)) {
       throw new StorageError('El archivo no contiene un volcado válido', { code: 'BAD_DUMP' });
@@ -399,6 +582,12 @@ export class Repository {
       },
     });
     await this._ensureMetadata();
+    // Importar es una decisión de confianza del usuario: lo importado se
+    // firma con la clave de este dispositivo.
+    if (this._integrity) {
+      await this._resignAll();
+      await this.setMeta(INTEGRITY_META_KEY, { since: new Date().toISOString() });
+    }
     return { tasks: tasks.length, logs: logs.length, encrypted };
   }
 
@@ -526,6 +715,10 @@ export class Repository {
       await this._adapter.clear(store);
     }
     await this._ensureMetadata();
+    if (this._integrity) {
+      await this._resignAll();
+      await this.setMeta(INTEGRITY_META_KEY, { since: new Date().toISOString() });
+    }
   }
 
   async close() {

@@ -22,7 +22,7 @@
  * porque `_rollover()` es idempotente respecto a la fecha.
  */
 
-import { RESET_STATE, EVENTS, STREAK_CONFIG, LIMITS } from '../core/constants.js';
+import { RESET_STATE, EVENTS, STREAK_CONFIG, LIMITS, SECURITY_CONFIG } from '../core/constants.js';
 import { toDateKey, msUntilNextMidnight, diffDays, addDays } from '../core/dateUtils.js';
 import { applyDay, reconcile } from './streakCalculator.js';
 import { buildHistory } from './selectors.js';
@@ -172,6 +172,10 @@ export class DayResetService {
       return;
     }
 
+    // Auditoría de integridad ANTES de leer nada para la racha: un registro
+    // manipulado desde el último arranque no debe llegar a puntuar.
+    await this.auditIntegrity(previousDay, reason);
+
     const tasks = await this._repository.listTasks();
     let streak = await this._repository.getStreak();
     // El divisor de cada día lo fija su propia agenda: lo que aplicaba ese día
@@ -183,7 +187,11 @@ export class DayResetService {
     /** @type {import('./streakCalculator.js').DayEvaluation[]} */
     const evaluations = [];
 
-    if (previousLog && !previousLog.closed) {
+    // Un log sin firma válida no se evalúa: se cierra, y el tramo de
+    // reconciliación lo trata como un día sin registro.
+    if (previousLog && !previousLog.closed && previousLog.unverified) {
+      await this._repository.saveLog({ ...previousLog, closed: true });
+    } else if (previousLog && !previousLog.closed) {
       const closed = await this._repository.saveLog({ ...previousLog, closed: true });
       if (streak.lastEvaluatedDate === null || diffDays(streak.lastEvaluatedDate, previousDay) > 0) {
         // Días huérfanos anteriores al que cerramos ahora.
@@ -236,12 +244,40 @@ export class DayResetService {
     const logs = await this._repository.listLogs(addDays(streak.lastEvaluatedDate, 1), addDays(throughDate, -1));
     /** @type {Object.<string, *>} */
     const byDate = {};
-    for (const log of logs) byDate[log.date] = log;
+    for (const log of logs) {
+      if (!log.unverified) byDate[log.date] = log;
+    }
 
     return reconcile(streak, byDate, throughDate, {
       activeTasksFor,
       config: STREAK_CONFIG,
     });
+  }
+
+  /**
+   * Verifica las firmas HMAC de la ventana reciente (ver
+   * `Repository.auditIntegrity`) y avisa si encuentra manipulación. Si la
+   * racha se reconstruyó, el store se actualiza con la nueva.
+   * @param {string} [activeDay] día abierto (no evaluado); por defecto, el del store.
+   * @param {string} [reason]
+   * @returns {Promise<Awaited<ReturnType<import('../storage/repository.js').Repository['auditIntegrity']>>>}
+   */
+  async auditIntegrity(activeDay = this._store.getState().today, reason = 'manual') {
+    const report = await this._repository.auditIntegrity({
+      days: SECURITY_CONFIG.INTEGRITY_AUDIT_DAYS,
+      today: activeDay,
+    });
+    if (report.status !== 'tampered') return report;
+
+    const patch = {};
+    if (report.streakTampered) patch.streak = await this._repository.getStreak();
+    const { log } = this._store.getState();
+    if (log && report.tamperedDates.includes(log.date)) patch.log = await this._repository.getLog(log.date);
+    if (Object.keys(patch).length > 0) this._store.setState(patch);
+
+    console.warn('[DayResetService] integridad: registros manipulados', report);
+    this._bus.emit(EVENTS.INTEGRITY_VIOLATION, { ...report, reason });
+    return report;
   }
 
   /**

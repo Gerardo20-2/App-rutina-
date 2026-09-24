@@ -21,7 +21,7 @@
 
 /* eslint-env serviceworker */
 
-const CACHE_NAME = 'routine-tracker-v4';
+const CACHE_NAME = 'routine-tracker-v5';
 const NAVIGATION_TIMEOUT_MS = 3000;
 
 /**
@@ -65,6 +65,11 @@ const ASSETS_TO_CACHE = [
   './src/storage/seedData.js',
   './src/security/cryptoService.js',
   './src/security/objectGuard.js',
+  './src/security/frameGuard.js',
+  './src/security/integrityService.js',
+  './src/security/inputGuard.js',
+  './src/security/privacyShield.js',
+  './src/security/rateLimiter.js',
   './src/platform/gestures.js',
   './src/platform/haptics.js',
   './src/platform/wakeLock.js',

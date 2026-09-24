@@ -6,6 +6,7 @@
  *   tasks           keyPath `id`      · idx_section, idx_order, idx_archived
  *   daily_logs      keyPath `date`    · idx_completion_rate
  *   system_metadata keyPath `key`
+ *   security_keys   keyPath `name`    (v4; `CryptoKey` no exportables, nunca se exporta)
  *
  * La ruta de upgrade contempla:
  *   0 → 2  instalación limpia
@@ -192,7 +193,10 @@ export class IndexedDbService extends StorageAdapter {
 
   async exportAll() {
     const db = await this.init();
-    const names = [...db.objectStoreNames].filter((name) => name !== STORES.LEGACY_APP_STATE);
+    // Las claves del dispositivo no salen nunca: ni son serializables ni
+    // tendría sentido restaurarlas en otro navegador.
+    const names = [...db.objectStoreNames]
+      .filter((name) => name !== STORES.LEGACY_APP_STATE && name !== STORES.SECURITY_KEYS);
     /** @type {Object.<string, Array<*>>} */
     const data = {};
     for (const name of names) {
@@ -206,7 +210,8 @@ export class IndexedDbService extends StorageAdapter {
       throw new StorageError('Volcado inválido', { code: 'BAD_DUMP' });
     }
     const db = await this.init();
-    const names = Object.keys(dump.data).filter((name) => db.objectStoreNames.contains(name));
+    const names = Object.keys(dump.data)
+      .filter((name) => name !== STORES.SECURITY_KEYS && db.objectStoreNames.contains(name));
     if (names.length === 0) return;
     // Una sola transacción sobre todos los stores: o entra todo, o nada.
     await this.transaction(names, 'readwrite', (tx) => {
@@ -216,6 +221,19 @@ export class IndexedDbService extends StorageAdapter {
         for (const value of dump.data[name]) objectStore.put(value);
       }
     });
+  }
+
+  get supportsSecrets() {
+    return true;
+  }
+
+  async getSecret(name) {
+    const row = await this.get(STORES.SECURITY_KEYS, name);
+    return row?.key;
+  }
+
+  async putSecret(name, key) {
+    await this.put(STORES.SECURITY_KEYS, { name, key, createdAt: new Date().toISOString() });
   }
 
   async close() {
@@ -241,6 +259,9 @@ function applySchema(db, tx, oldVersion) {
   }
   if (!db.objectStoreNames.contains(STORES.SYSTEM_METADATA)) {
     db.createObjectStore(STORES.SYSTEM_METADATA, { keyPath: 'key' });
+  }
+  if (!db.objectStoreNames.contains(STORES.SECURITY_KEYS)) {
+    db.createObjectStore(STORES.SECURITY_KEYS, { keyPath: 'name' });
   }
 
   for (const [storeName, indices] of Object.entries(INDICES)) {

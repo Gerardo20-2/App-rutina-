@@ -203,8 +203,13 @@ routine-tracker/
 │   │   ├── seedData.js            # Rutina real precargada
 │   │   └── storageAdapter.js      # Interfaz base
 │   ├── security/
-│   │   ├── cryptoService.js       # PBKDF2 + AES-GCM, sobres de backup cifrados
-│   │   └── objectGuard.js         # JSON sin __proto__, deepFreeze, saneado profundo
+│   │   ├── cryptoService.js       # PBKDF2 + AES-GCM, sobres cifrados, wipeBuffer
+│   │   ├── frameGuard.js          # Anti-clickjacking (script clásico en <head>)
+│   │   ├── inputGuard.js          # Drop sólo en la zona de importación, portapapeles en texto plano
+│   │   ├── integrityService.js    # HMAC-SHA-256 de logs y racha con clave no exportable
+│   │   ├── objectGuard.js         # JSON sin __proto__, deepFreeze, saneado profundo
+│   │   ├── privacyShield.js       # Capa negra para la miniatura del selector de apps
+│   │   └── rateLimiter.js         # Freno progresivo a intentos de descifrado
 │   ├── platform/
 │   │   ├── gestures.js            # Reconocedor de swipe (Pointer Events)
 │   │   ├── haptics.js             # Vibration API
@@ -410,7 +415,7 @@ __routineTracker.dayReset.check('manual')  // forzar el corte de día
 npm test                          # o: node --test tests/*.test.js
 ```
 
-161 pruebas sobre el runner nativo de Node, sin navegador ni dependencias:
+196 pruebas sobre el runner nativo de Node, sin navegador ni dependencias:
 
 | Archivo | Cubre |
 |---|---|
@@ -423,6 +428,7 @@ npm test                          # o: node --test tests/*.test.js
 | `repository.test.js` | Persistencia, migración v1, siembra real, divisor por día, UI optimista y su reversión |
 | `dayResetService.test.js` | Corte de medianoche, ausencias con divisor por agenda, reloj desincronizado |
 | `security.test.js` | Payloads XSS renderizados como texto, cifrado/descifrado, clave errónea, sobres adulterados, JSON con `__proto__`, CSP y Service Worker |
+| `securityAdvanced.test.js` | HMAC de logs y racha (manipulación, inyección, pérdida de clave, blanqueo), `fill(0)` de secretos, backoff de intentos, pantalla de privacidad, framebusting, drop y portapapeles |
 | `events.test.js` | Bus de eventos y aislamiento de errores |
 
 Comprobaciones adicionales en CI:
@@ -548,12 +554,34 @@ superficie de ataque es el propio navegador. Las defensas, sin librerías:
 | Copias | Sobre `{ format, version, kdf, iterations, cipher, salt, iv, ciphertext, checksum }`: PBKDF2-SHA-256 (100 000 iteraciones, salt de 16 B) → AES-256-GCM (IV de 12 B por operación), cabecera autenticada como AAD. El checksum SHA-256 se verifica antes de derivar la clave. Las copias en claro antiguas se siguen aceptando, revalidadas fila a fila. |
 | CSP | Meta etiqueta con `default-src 'none'`, `script-src 'self'`, `connect-src 'self'`, `base-uri 'none'`, `form-action 'none'`, `object-src 'none'`. |
 | Service Worker | Rechaza subrecursos de otro origen con error de red; sólo cachea respuestas `basic`, del mismo origen y sin redirección. |
+| Integridad local | Cada `daily_log` y el estado de racha llevan una firma HMAC-SHA-256 con una clave del dispositivo no exportable (store `security_keys`). Al arrancar y a medianoche se auditan los últimos 30 días: un registro que no verifica queda `unverified`, cuenta como ausencia para la racha y se avisa con un toast; una racha que no verifica se reconstruye con los logs que sí. Un registro con firma inválida nunca se vuelve a firmar como bueno. |
+| Memoria | Las frases de paso viajan como `Uint8Array` y se ponen a cero (`wipeBuffer`) en un `finally`, igual que el texto en claro. El campo de contraseña se sobrescribe con ruido antes de vaciarse. |
+| Fuerza bruta | Fallos 1–3: +500 ms; 4.º: bloqueo de 5 s; 5.º: 30 s; después se duplica (techo 24 h), con jitter de `getRandomValues`. Todo fallo tarda al menos 750 ms, sea de checksum o de clave. |
+| Privacidad visual | Al perder visibilidad o foco, capa negra (`#privacy-shield`, `z-index` máximo) y `#app` desenfocado; se retira con la página visible y con foco. |
+| Clickjacking | `frameGuard.js` en el `<head>`: si la app está enmarcada, se oculta y se intenta salir al marco superior; si no se puede, se detiene la carga. |
+| Drag & drop / portapapeles | Soltar sólo se admite en el botón de importar (un archivo `.json`); copiar, sólo texto plano saneado con `writeText`. |
 
-Límites conocidos: el checksum SHA-256 sin clave detecta corrupción, pero es
-la etiqueta GCM la que impide falsificar una copia. La base de datos local
-(IndexedDB) **no** está cifrada en reposo: hacerlo exige pedir un PIN en cada
-arranque. `frame-ancestors` y las cabeceras HTTP no se pueden fijar desde
-GitHub Pages.
+Límites conocidos, sin adornos:
+
+- El checksum SHA-256 sin clave detecta corrupción; es la etiqueta GCM la que
+  impide falsificar una copia.
+- La base de datos local (IndexedDB) **no** está cifrada en reposo: hacerlo
+  exige pedir un PIN en cada arranque.
+- La firma HMAC es **evidencia de manipulación, no una barrera**: un script que
+  ya corre en el origen de la app no puede extraer la clave, pero sí usarla
+  para firmar. Detecta ediciones hechas fuera del código de la app. Con el
+  motor de respaldo `localStorage` (sin almacén de claves) está desactivada.
+- La higiene de memoria es de mejor esfuerzo: `input.value` es un `string`
+  inmutable que JavaScript no puede borrar, y el recolector puede haber
+  copiado un buffer antes de ponerlo a cero.
+- El freno de intentos sólo protege la interfaz y vive en memoria. Contra quien
+  tenga el archivo de copia, la defensa es la longitud de la frase y PBKDF2.
+- El sistema operativo decide cuándo toma la miniatura del selector de apps;
+  la capa negra llega a tiempo en Chrome para Android, pero no hay garantía.
+- `frame-ancestors` y las cabeceras HTTP no se pueden fijar desde GitHub
+  Pages. Chrome impide que un iframe de otro origen navegue la ventana
+  superior sin gesto del usuario, así que el framebuster no siempre «escapa»;
+  lo que sí garantiza es que la app enmarcada queda oculta y sin montar.
 
 ---
 

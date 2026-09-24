@@ -920,6 +920,7 @@
 
 .toast--success { border-left-color: var(--c-accent); }
 .toast--error   { border-left-color: var(--c-danger); }
+.toast--warning { border-left-color: var(--c-warning); }
 
 .toast__text {
   flex: 1;
@@ -945,4 +946,15 @@
   margin: 20vh auto;
   padding: var(--sp-5);
   text-align: center;
+}
+
+/* Importación bloqueada por el freno de intentos (security/rateLimiter.js). */
+.btn.is-disabled {
+  opacity: .5;
+  pointer-events: none;
+}
+
+.settings__lock {
+  color: var(--c-danger);
+  font-variant-numeric: tabular-nums;
 }

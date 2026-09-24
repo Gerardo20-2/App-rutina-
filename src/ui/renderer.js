@@ -26,6 +26,8 @@ import { createBottomBar } from './components/bottomBar.js';
 import { createToaster } from './components/toast.js';
 import { EVENTS, STREAK_TRANSITION, LIMITS } from '../core/constants.js';
 import { TimeBlockWatcher, FALLBACK_BLOCK_ID } from '../domain/timeBlockService.js';
+import { installPrivacyShield } from '../security/privacyShield.js';
+import { installDropGuard } from '../security/inputGuard.js';
 
 /**
  * @param {{
@@ -135,6 +137,8 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
 
   function mount() {
     root.replaceChildren(app, bottomBar.el, editor.el, historySheet.el, settingsSheet.el, toaster.el);
+    const privacyShield = installPrivacyShield();
+    const removeDropGuard = installDropGuard();
     applyPreferences(store.getState().preferences);
     render(store.getState());
 
@@ -183,6 +187,19 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
       });
     });
 
+    const offIntegrity = bus.on(EVENTS.INTEGRITY_VIOLATION, ({ tamperedDates, streakTampered }) => {
+      const parts = [];
+      if (tamperedDates.length > 0) {
+        parts.push(`${tamperedDates.length} ${tamperedDates.length === 1 ? 'día alterado' : 'días alterados'} fuera de la app`);
+      }
+      if (streakTampered) parts.push('racha recalculada');
+      bus.emit(EVENTS.TOAST, {
+        message: `⚠️ Integridad: ${parts.join(' · ')}. No cuentan para la racha.`,
+        tone: 'warning',
+        timeout: 8000,
+      });
+    });
+
     const offError = bus.on(EVENTS.ERROR, ({ error }) => {
       bus.emit(EVENTS.TOAST, { message: error?.message ?? 'Algo ha fallado', tone: 'error' });
     });
@@ -193,7 +210,10 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
       offDayRolled();
       offToggled();
       offClock();
+      offIntegrity();
       offError();
+      privacyShield.destroy();
+      removeDropGuard();
       if (frame !== null) cancelAnimationFrame(frame);
       for (const component of components) component.destroy();
       editor.destroy();
@@ -226,10 +246,14 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
     else documentRoot.dataset.theme = preferences.theme;
   }
 
-  /** @param {string} passphrase */
+  /** @param {Uint8Array} passphrase se pone a cero tras usarla. */
   async function exportBackup(passphrase) {
-    const envelope = await service.exportBackup(passphrase);
-    settings.clearPassphrase();
+    let envelope;
+    try {
+      envelope = await service.exportBackup(passphrase);
+    } finally {
+      passphrase.fill(0);
+    }
     const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = h('a', {
@@ -246,15 +270,23 @@ export function createRenderer({ root, store, bus, service, haptics, wakeLock })
 
   /**
    * @param {File} file
-   * @param {string} passphrase
+   * @param {Uint8Array} passphrase se pone a cero tras usarla.
    */
   async function importBackup(file, passphrase) {
-    // Un backup legítimo pesa unos pocos cientos de KB: un archivo enorme sólo
-    // serviría para colgar el hilo principal en `JSON.parse`.
-    if (file.size > LIMITS.BACKUP_MAX_BYTES) throw new Error('El archivo es demasiado grande para ser una copia');
-    const text = await file.text();
-    const result = await service.importBackup(text, { passphrase });
-    settings.clearPassphrase();
+    let result;
+    try {
+      // Un backup legítimo pesa unos pocos cientos de KB: un archivo enorme sólo
+      // serviría para colgar el hilo principal en `JSON.parse`.
+      if (file.size > LIMITS.BACKUP_MAX_BYTES) throw new Error('El archivo es demasiado grande para ser una copia');
+      const text = await file.text();
+      result = await service.importBackup(text, { passphrase });
+    } catch (error) {
+      const lockMs = error?.retryAfterMs ?? error?.lockedForMs;
+      if (lockMs > 0) settings.setLockout(lockMs);
+      throw error;
+    } finally {
+      passphrase.fill(0);
+    }
     settingsSheet.close();
     bus.emit(EVENTS.TOAST, {
       message: `Importado${result.encrypted ? ' (cifrado)' : ''}: ${result.tasks} tareas y ${result.logs} días`,

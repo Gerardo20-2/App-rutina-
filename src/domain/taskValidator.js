@@ -39,6 +39,7 @@ import { isBlockId, getBlock, FALLBACK_BLOCK_ID } from './timeBlockService.js';
  * @property {number} completedCount   Tareas marcadas como completed.
  * @property {number} completionRate   completedCount / totalActiveTasks (0.0–1.0).
  * @property {boolean} closed          Procesado por el corte de medianoche.
+ * @property {true} [unverified]       Firma de integridad inválida: se ignora para la racha.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -343,6 +344,9 @@ export function validateDailyLog(input) {
     completedCount,
     completionRate: computable === 0 ? 0 : round4(Math.min(1, completedCount / computable)),
     closed: Boolean(input.closed),
+    // Marca de la auditoría de integridad: el registro no superó su firma
+    // HMAC y no cuenta para la racha. Sólo existe cuando es `true`.
+    ...(input.unverified === true ? { unverified: true } : {}),
   };
 }
 

@@ -374,7 +374,7 @@ try {
     return { schema: backup.schema, tasks: backup.data.tasks.length, logs: backup.data.daily_logs.length };
   });
   console.log('backup:', dump);
-  check(dump.schema === 3, 'el volcado no declara el esquema 3');
+  check(dump.schema === 4, 'el volcado no declara el esquema 4');
   check(dump.tasks === INITIAL_TASKS.length + 2,
     `el volcado debería tener ${INITIAL_TASKS.length + 2} tareas, tiene ${dump.tasks}`);
 

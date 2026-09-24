@@ -42,6 +42,26 @@ export class LocalStorageService extends StorageAdapter {
     this._isMemory = this._backend instanceof MemoryBackend;
     /** @type {Map<string, Object>} Caché de escritura para evitar parse repetido. */
     this._cache = new Map();
+    /** @type {Map<string, CryptoKey>} */
+    this._secrets = new Map();
+  }
+
+  /**
+   * `localStorage` sólo guarda texto y una `CryptoKey` no exportable no se
+   * puede serializar: los secretos sólo se ofrecen en modo memoria, donde
+   * clave y datos mueren juntos.
+   */
+  get supportsSecrets() {
+    return this._isMemory;
+  }
+
+  async getSecret(name) {
+    return this._secrets.get(name);
+  }
+
+  async putSecret(name, key) {
+    if (!this._isMemory) throw new StorageError('localStorage no puede guardar claves', { code: 'NO_SECRETS' });
+    this._secrets.set(name, key);
   }
 
   get engine() {
